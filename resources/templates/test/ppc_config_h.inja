@@ -27,6 +27,7 @@
 #define REX_IMAGE_SIZE 0x{{ image_size }}ull
 #define REX_CODE_BASE 0x{{ code_base }}ull
 #define REX_CODE_SIZE 0x{{ code_size }}ull
+#define REX_THUNK_RESERVE_SIZE 0x10000ull
 
 #endif // REX_CONFIG_H_INCLUDED
 
@@ -90,14 +91,22 @@
 #define REX_LOOKUP_FUNC(x, y) \
   (*(PPCFunc**)(x + REX_IMAGE_BASE + REX_IMAGE_SIZE + (u64(u32(y) - REX_CODE_BASE) * 2)))
 
-#ifdef REXGLUE_ENABLE_PROFILING
-#define REX_CALL_INDIRECT_FUNC(x) \
-  PROFILE_FUNCTION_DISPATCHED();  \
-  REX_LOOKUP_FUNC(base, x)(ctx, base);
-#else
-#define REX_CALL_INDIRECT_FUNC(x) \
-  REX_LOOKUP_FUNC(base, x)(ctx, base);
-#endif
+#include <rex/perf/counter.h>
+#define REX_CALL_INDIRECT_FUNC(x)                                                           \
+  do {                                                                                      \
+    PROFILE_FUNCTION_DISPATCHED();                                                          \
+    uint32_t rex_indirect_target_ = (uint32_t)(x);                                          \
+    ctx.last_indirect_target = rex_indirect_target_;                                        \
+    PPCFunc* rex_indirect_func_ = nullptr;                                                  \
+    if (rex_indirect_target_ >= REX_CODE_BASE &&                                                       \
+        rex_indirect_target_ < (REX_CODE_BASE + REX_CODE_SIZE + REX_THUNK_RESERVE_SIZE)) {             \
+      rex_indirect_func_ = REX_LOOKUP_FUNC(base, rex_indirect_target_);                     \
+    }                                                                                       \
+    if (!rex_indirect_func_) {                                                              \
+      rex_indirect_func_ = rex::runtime::ResolveIndirectFunction(rex_indirect_target_);     \
+    }                                                                                       \
+    rex_indirect_func_(ctx, base);                                                          \
+  } while (0)
 
 //=============================================================================
 // Flush Mode

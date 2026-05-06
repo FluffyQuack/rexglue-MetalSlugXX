@@ -242,8 +242,24 @@ X_STATUS UserModule::Unload() {
   return X_STATUS_UNSUCCESSFUL;
 }
 
-uint32_t UserModule::GetProcAddressByOrdinal(uint16_t ordinal) {
-  return xex_module()->GetProcAddress(ordinal);
+uint32_t UserModule::GetProcAddressByOrdinal(uint16_t ordinal, uint32_t caller_address) {
+  uint32_t guest_addr = xex_module()->GetProcAddress(ordinal);
+  if (!guest_addr || !caller_address) {
+    return guest_addr;
+  }
+
+  // Allocate a thunk in the caller's module thunk range so the caller can
+  // dispatch through its own PPC_LOOKUP_FUNC with its own per-module constants.
+  // Without this, an address in another module's code range would compute a
+  // wrong (or out-of-bounds) index into the caller's dispatch table.
+  auto* dispatcher = kernel_state_->function_dispatcher();
+  auto* func = dispatcher->GetFunction(guest_addr);
+  if (!func) {
+    // DLL not recompiled - return raw guest address (interpreted binary path)
+    return guest_addr;
+  }
+
+  return dispatcher->AllocateThunk(func, caller_address);
 }
 
 uint32_t UserModule::GetProcAddressByName(std::string_view name) {
