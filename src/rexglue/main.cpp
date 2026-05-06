@@ -9,7 +9,6 @@
 #include "cli_utils.h"
 #include "commands/codegen_command.h"
 #include "commands/init_command.h"
-#include "commands/migrate_command.h"
 #include "commands/test_recompiler.h"
 
 #include <chrono>
@@ -60,7 +59,6 @@ void PrintUsage() {
   std::cerr << "Commands:\n";
   std::cerr << "  codegen <config.toml>   Analyze XEX and generate C++ code\n";
   std::cerr << "  init                    Initialize a new project\n";
-  std::cerr << "  migrate                 Migrate project to current SDK version\n";
   std::cerr << "  recompile-tests         Generate Catch2 tests from PPC assembly\n\n";
   std::cerr << "Codegen flags:\n";
   std::cerr
@@ -116,10 +114,12 @@ int main(int argc, char** argv) {
 
   REXLOG_INFO(GetTitleString());
 
-  // Set up CLI context
   rexglue::cli::CliContext ctx;
   ctx.verbose = verbose;
-  ctx.force = REXCVAR_GET(force);
+  bool force_flag = REXCVAR_GET(force);
+  ctx.overwrite_existing = force_flag;
+  ctx.generate_despite_errors = force_flag;
+  ctx.skip_upgrade_consent = force_flag;
   ctx.enableExceptionHandlers = REXCVAR_GET(enable_exception_handlers);
 
   // Parse --target comma-separated list
@@ -156,7 +156,7 @@ int main(int argc, char** argv) {
     opts.app_author = REXCVAR_GET(app_author);
     opts.sdk_example = REXCVAR_GET(sdk_example);
     opts.template_dir = REXCVAR_GET(template_dir);
-    opts.force = ctx.force;
+    opts.force = ctx.overwrite_existing;
 
     if (opts.app_name.empty()) {
       REXLOG_ERROR("--app_name is required for init command");
@@ -193,18 +193,6 @@ int main(int argc, char** argv) {
       REXLOG_ERROR("Test recompilation failed");
       return 1;
     }
-  } else if (command == "migrate") {
-    rexglue::cli::MigrateOptions opts;
-    opts.app_root = REXCVAR_GET(app_root);
-    opts.template_dir = REXCVAR_GET(template_dir);
-    opts.force = ctx.force;
-
-    if (opts.app_root.empty()) {
-      REXLOG_ERROR("--app_root is required for migrate command");
-      return 1;
-    }
-
-    result = rexglue::cli::MigrateProject(opts, ctx);
   } else {
     REXLOG_ERROR("Unknown command: {}", command);
     PrintUsage();
@@ -215,6 +203,10 @@ int main(int argc, char** argv) {
   auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
 
   if (!result) {
+    if (result.error().category == rex::ErrorCategory::UserAbort) {
+      REXLOG_INFO("{}", result.error().what());
+      return 2;
+    }
     REXLOG_ERROR("Operation failed: {} (took {:.3f}s)", result.error().what(),
                  elapsed.count() / 1000.0);
     return 1;

@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <fstream>
 
 #include <toml++/toml.hpp>
 
@@ -52,6 +53,10 @@ std::optional<ManifestConfig> ManifestConfig::Load(const std::filesystem::path& 
   // [project]
   if (auto project = tbl["project"].as_table()) {
     manifest.projectName = (*project)["projectName"].value_or<std::string>("");
+    auto stamp = (*project)["sdkVersion"].value<std::string>();
+    if (stamp && !stamp->empty()) {
+      manifest.sdkVersion = *stamp;
+    }
   }
   if (manifest.projectName.empty()) {
     REXLOG_ERROR("Manifest missing [project].projectName");
@@ -105,6 +110,52 @@ bool ManifestConfig::IsManifest(const std::filesystem::path& path) {
   } catch (const toml::parse_error&) {
     return false;
   }
+}
+
+bool ManifestConfig::WriteSdkVersionStamp(const std::filesystem::path& path,
+                                          std::string_view version) {
+  toml::table tbl;
+  try {
+    tbl = toml::parse_file(path.string());
+  } catch (const toml::parse_error& err) {
+    REXLOG_ERROR("Failed to parse manifest for stamping {}: {}", path.string(), err.what());
+    return false;
+  }
+
+  auto* project = tbl["project"].as_table();
+  if (!project) {
+    REXLOG_ERROR("Manifest missing [project] table; cannot stamp: {}", path.string());
+    return false;
+  }
+  project->insert_or_assign("sdkVersion", std::string(version));
+
+  auto tmp_path = path;
+  tmp_path += ".tmp";
+
+  {
+    std::ofstream out(tmp_path);
+    if (!out) {
+      REXLOG_ERROR("Failed to open manifest tmp for writing: {}", tmp_path.string());
+      return false;
+    }
+    out << tbl;
+    if (!out.good()) {
+      REXLOG_ERROR("Failed while writing manifest tmp: {}", tmp_path.string());
+      std::error_code ignore;
+      std::filesystem::remove(tmp_path, ignore);
+      return false;
+    }
+  }
+
+  std::error_code ec;
+  std::filesystem::rename(tmp_path, path, ec);
+  if (ec) {
+    REXLOG_ERROR("Failed to rename manifest tmp into place: {}", ec.message());
+    std::error_code ignore;
+    std::filesystem::remove(tmp_path, ignore);
+    return false;
+  }
+  return true;
 }
 
 }  // namespace rex::codegen

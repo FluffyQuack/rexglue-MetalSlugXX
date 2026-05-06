@@ -30,8 +30,22 @@ class ProjectRecompiler {
   explicit ProjectRecompiler(ManifestConfig manifest);
   Result<void> Run(const ProjectRecompilerOptions& opts);
 
+  /**
+   * Aggregated basenames of files removed across all modules during the most
+   * recent Run() call. Empty until Run() completes successfully.
+   */
+  const std::vector<std::string>& deletedFiles() const { return deletedFiles_; }
+
+  /**
+   * Aggregated basenames of files written across all modules during the most
+   * recent Run() call. Empty until Run() completes successfully.
+   */
+  const std::vector<std::string>& writtenFiles() const { return writtenFiles_; }
+
  private:
   ManifestConfig manifest_;
+  std::vector<std::string> deletedFiles_;
+  std::vector<std::string> writtenFiles_;
 };
 
 }  // namespace rex::codegen

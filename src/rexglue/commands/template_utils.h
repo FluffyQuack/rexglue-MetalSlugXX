@@ -1,6 +1,6 @@
 /**
  * @file        rexglue/commands/template_utils.h
- * @brief       Shared utilities for init and migrate commands
+ * @brief       Shared utilities for init command
  *
  * @copyright   Copyright (c) 2026 Tom Clay <tomc@tctechstuff.com>
  * @license     BSD 3-Clause License

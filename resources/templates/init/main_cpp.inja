@@ -1,6 +1,4 @@
 // {{ names.snake_case }} - ReXGlue Recompiled Project
-//
-// This file is yours to edit. 'rexglue migrate' will NOT overwrite it.
 
 #include "generated/default_xex/{{ names.snake_case }}_init.h"
 

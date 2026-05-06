@@ -94,6 +94,100 @@ TEST_CASE("Manifest: missing project name fails", "[codegen][manifest]") {
   CHECK_FALSE(result.has_value());
 }
 
+TEST_CASE("Manifest: parses sdkVersion when present", "[codegen][manifest]") {
+  TempDir tmp;
+  tmp.writeFile("manifest.toml", R"(
+[project]
+projectName = "mygame"
+sdkVersion = "0.7.8.48"
+
+[entrypoint]
+config = "mygame_default_xex.toml"
+  )");
+  auto result = rex::codegen::ManifestConfig::Load(tmp.path / "manifest.toml");
+  REQUIRE(result.has_value());
+  REQUIRE(result->sdkVersion.has_value());
+  CHECK(*result->sdkVersion == "0.7.8.48");
+}
+
+TEST_CASE("Manifest: sdkVersion is nullopt when absent", "[codegen][manifest]") {
+  TempDir tmp;
+  tmp.writeFile("manifest.toml", R"(
+[project]
+projectName = "mygame"
+
+[entrypoint]
+config = "mygame_default_xex.toml"
+  )");
+  auto result = rex::codegen::ManifestConfig::Load(tmp.path / "manifest.toml");
+  REQUIRE(result.has_value());
+  CHECK_FALSE(result->sdkVersion.has_value());
+}
+
+TEST_CASE("Manifest: WriteSdkVersionStamp inserts when missing", "[codegen][manifest]") {
+  TempDir tmp;
+  tmp.writeFile("manifest.toml", R"([project]
+projectName = "mygame"
+
+[entrypoint]
+config = "mygame_default_xex.toml"
+)");
+
+  auto path = tmp.path / "manifest.toml";
+  CHECK(rex::codegen::ManifestConfig::WriteSdkVersionStamp(path, "0.8.0"));
+
+  auto result = rex::codegen::ManifestConfig::Load(path);
+  REQUIRE(result.has_value());
+  REQUIRE(result->sdkVersion.has_value());
+  CHECK(*result->sdkVersion == "0.8.0");
+  CHECK(result->projectName == "mygame");
+  CHECK(result->entrypointConfig == tmp.path / "mygame_default_xex.toml");
+}
+
+TEST_CASE("Manifest: WriteSdkVersionStamp overwrites existing", "[codegen][manifest]") {
+  TempDir tmp;
+  tmp.writeFile("manifest.toml", R"([project]
+projectName = "mygame"
+sdkVersion = "0.7.0"
+
+[entrypoint]
+config = "mygame_default_xex.toml"
+)");
+
+  auto path = tmp.path / "manifest.toml";
+  CHECK(rex::codegen::ManifestConfig::WriteSdkVersionStamp(path, "0.8.0"));
+
+  auto result = rex::codegen::ManifestConfig::Load(path);
+  REQUIRE(result.has_value());
+  REQUIRE(result->sdkVersion.has_value());
+  CHECK(*result->sdkVersion == "0.8.0");
+}
+
+TEST_CASE("Manifest: WriteSdkVersionStamp preserves modules and entrypoint",
+          "[codegen][manifest]") {
+  TempDir tmp;
+  tmp.writeFile("manifest.toml", R"([project]
+projectName = "mygame"
+
+[entrypoint]
+config = "mygame_default_xex.toml"
+
+[[modules]]
+config = "mygame_lib_a.toml"
+guestPath = "bin/lib_a.dll"
+)");
+
+  auto path = tmp.path / "manifest.toml";
+  CHECK(rex::codegen::ManifestConfig::WriteSdkVersionStamp(path, "0.8.0"));
+
+  auto result = rex::codegen::ManifestConfig::Load(path);
+  REQUIRE(result.has_value());
+  REQUIRE(result->modules.size() == 1u);
+  CHECK(result->modules[0].guestPath == "bin/lib_a.dll");
+  REQUIRE(result->sdkVersion.has_value());
+  CHECK(*result->sdkVersion == "0.8.0");
+}
+
 TEST_CASE("CanonicalizeModuleGuestPath: device prefix", "[codegen][manifest][canonicalize]") {
   using rex::codegen::CanonicalizeModuleGuestPath;
   CHECK(CanonicalizeModuleGuestPath("game:\\bin\\foo.dll") == "bin/foo.dll");

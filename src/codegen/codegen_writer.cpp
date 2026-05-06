@@ -159,6 +159,7 @@ bool CodegenWriter::write(bool force) {
       if (filename == "sources.cmake" || filename.starts_with(prefix) ||
           filename.starts_with("ppc_recomp") || filename.starts_with("ppc_func_mapping") ||
           filename.starts_with("function_table_init") || filename.starts_with("ppc_config")) {
+        deletedFiles_.push_back(filename);
         std::filesystem::remove(entry.path());
       }
     }
@@ -320,6 +321,8 @@ void CodegenWriter::FlushPendingWrites() {
       fclose(f);
       REXCODEGEN_TRACE("Wrote {} bytes to {}", content.size(), filePath);
     }
+
+    writtenFiles_.push_back(filename);
   }
 
   pendingWrites.clear();

@@ -176,3 +176,23 @@ TEST_CASE("TemplateRegistry: loadOverrides ignores unknown IDs", "[TemplateRegis
 
   CleanupTempDir(tmpDir);
 }
+
+TEST_CASE("Template: manifest_toml emits sdkVersion when include_stamp is true",
+          "[TemplateRegistry][manifest]") {
+  rex::codegen::TemplateRegistry registry;
+  std::string json =
+      R"({"names": {"snake_case": "mygame", "pascal_case": "Mygame", "upper_case": "MYGAME"}, "sdk_version": "0.8.0", "include_stamp": true})";
+  std::string out = registry.render("init/manifest_toml", json);
+  CHECK(out.find("sdkVersion = \"0.8.0\"") != std::string::npos);
+  CHECK(out.find("projectName = \"mygame\"") != std::string::npos);
+}
+
+TEST_CASE("Template: manifest_toml omits sdkVersion when include_stamp is false",
+          "[TemplateRegistry][manifest]") {
+  rex::codegen::TemplateRegistry registry;
+  std::string json =
+      R"({"names": {"snake_case": "mygame", "pascal_case": "Mygame", "upper_case": "MYGAME"}, "sdk_version": "0.8.0", "include_stamp": false})";
+  std::string out = registry.render("init/manifest_toml", json);
+  CHECK(out.find("sdkVersion") == std::string::npos);
+  CHECK(out.find("projectName = \"mygame\"") != std::string::npos);
+}

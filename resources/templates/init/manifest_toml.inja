@@ -11,7 +11,8 @@
 
 [project]
 projectName = "{{ names.snake_case }}"
-
+{% if include_stamp %}sdkVersion = "{{ sdk_version }}"
+{% endif %}
 [entrypoint]
 config = "{{ names.snake_case }}_default_xex.toml"
 

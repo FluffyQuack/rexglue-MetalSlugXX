@@ -297,6 +297,8 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
 
   // ---- Phase 3: Write output ----
 
+  deletedFiles_.clear();
+  writtenFiles_.clear();
   for (auto& entry : contexts) {
     REXLOG_INFO("Writing output for '{}'...", entry.module->targetName);
     CodegenWriter writer(entry.ctx, runtime.get());
@@ -304,6 +306,10 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
       return Err<void>(ErrorCategory::Validation,
                        fmt::format("Write failed for '{}'", entry.module->targetName));
     }
+    deletedFiles_.insert(deletedFiles_.end(), writer.deletedFiles().begin(),
+                         writer.deletedFiles().end());
+    writtenFiles_.insert(writtenFiles_.end(), writer.writtenFiles().begin(),
+                         writer.writtenFiles().end());
   }
 
   // ---- Phases 4 & 5: Emit project-level artifacts (module_registry + cmake) ----

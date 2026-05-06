@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace rex::codegen {
@@ -34,6 +35,7 @@ std::string CanonicalizeModuleGuestPath(std::string_view path, std::string_view 
  */
 struct ManifestConfig {
   std::string projectName;
+  std::optional<std::string> sdkVersion;   ///< Last SDK that ran codegen on this project
   std::filesystem::path entrypointConfig;  ///< Absolute path to entrypoint config
   std::vector<ManifestModuleEntry> modules;
   std::filesystem::path manifestDir;  ///< Directory containing the manifest
@@ -48,6 +50,13 @@ struct ManifestConfig {
    * legacy single-binary config.
    */
   static bool IsManifest(const std::filesystem::path& path);
+
+  /**
+   * Insert or overwrite [project].sdkVersion in the manifest file at `path`.
+   * Preserves the rest of the file's content. Returns false on parse or write
+   * failure.
+   */
+  static bool WriteSdkVersionStamp(const std::filesystem::path& path, std::string_view version);
 };
 
 }  // namespace rex::codegen

@@ -16,10 +16,18 @@ add_executable(unit_tests
     system/guest_path_test.cpp
     system/function_dispatcher_test.cpp
     codegen/manifest_test.cpp
+    rexglue/upgrade_detect_test.cpp
+    rexglue/include_scan_test.cpp
+)
+
+target_sources(unit_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/rexglue/commands/upgrade_detect.cpp
+    ${PROJECT_SOURCE_DIR}/src/rexglue/commands/include_scan.cpp
 )
 
 target_include_directories(unit_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/src
 )
 
 target_link_libraries(unit_tests PRIVATE

@@ -22,9 +22,11 @@ namespace rexglue::cli {
  */
 struct CliContext {
   bool verbose = false;
-  bool force = false;                    // Generate output despite validation errors
-  bool enableExceptionHandlers = false;  // Enable SEH exception handler generation
-  std::vector<std::string> targets;      // --target filter for multi-binary codegen
+  bool overwrite_existing = false;       ///< Overwrite non-empty init dir / existing config
+  bool generate_despite_errors = false;  ///< Codegen: emit output despite validation errors
+  bool skip_upgrade_consent = false;     ///< Codegen: auto-accept SDK upgrade overwrites
+  bool enableExceptionHandlers = false;  ///< Enable SEH exception handler generation
+  std::vector<std::string> targets;      ///< --target filter for multi-binary codegen
 };
 
 }  // namespace rexglue::cli
