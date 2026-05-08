@@ -152,7 +152,6 @@ void KernelState::SetProcessTLSVars(X_KPROCESS* process, uint32_t num_slots, uin
 }
 
 KernelState::~KernelState() {
-  // Destroy app_manager while terminated thread stacks are still valid
   app_manager_.reset();
 
   // Stop the dispatch thread before touching the object table
