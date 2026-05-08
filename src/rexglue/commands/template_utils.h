@@ -100,6 +100,34 @@ inline bool write_file(const std::filesystem::path& path, const std::string& con
   return true;
 }
 
+inline bool write_file_atomic(const std::filesystem::path& path, const std::string& content) {
+  std::filesystem::path tmp = path;
+  tmp += ".tmp";
+  {
+    std::ofstream out(tmp, std::ios::binary);
+    if (!out) {
+      REXLOG_ERROR("Failed to open tmp file for write: {}", tmp.string());
+      return false;
+    }
+    out << content;
+    if (!out.good()) {
+      std::error_code ignore;
+      std::filesystem::remove(tmp, ignore);
+      REXLOG_ERROR("Failed while writing tmp file: {}", tmp.string());
+      return false;
+    }
+  }
+  std::error_code ec;
+  std::filesystem::rename(tmp, path, ec);
+  if (ec) {
+    std::error_code ignore;
+    std::filesystem::remove(tmp, ignore);
+    REXLOG_ERROR("Failed to rename {} to {}: {}", tmp.string(), path.string(), ec.message());
+    return false;
+  }
+  return true;
+}
+
 inline std::string read_file(const std::filesystem::path& path) {
   std::ifstream in(path, std::ios::binary);
   if (!in)

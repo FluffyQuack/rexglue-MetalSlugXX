@@ -127,7 +127,7 @@ Result<void> InitProject(const InitOptions& opts, const CliContext& ctx) {
     return Err<void>(ErrorCategory::IO, "--game_root is not a directory: " + gameRootAbs.string());
 
   fs::path xexRelToGame = fs::relative(xexAbs, gameRootAbs, ec);
-  if (ec || xexRelToGame.empty() || xexRelToGame.native()[0] == '.') {
+  if (ec || xexRelToGame.empty() || *xexRelToGame.begin() == fs::path("..")) {
     return Err<void>(ErrorCategory::Config, "--xex_path (" + xexAbs.string() +
                                                 ") is not inside --game_root (" +
                                                 gameRootAbs.string() + ")");
@@ -195,21 +195,42 @@ Result<void> InitProject(const InitOptions& opts, const CliContext& ctx) {
   }
   ui::KeyValueBlock("Initializing project:", header_rows);
 
-  if (fs::exists(projectRoot)) {
-    if (!fs::is_directory(projectRoot))
-      return Err<void>(ErrorCategory::IO,
-                       "Path exists but is not a directory: " + projectRoot.string());
+  if (fs::exists(projectRoot) && !fs::is_directory(projectRoot)) {
+    return Err<void>(ErrorCategory::IO,
+                     "Path exists but is not a directory: " + projectRoot.string());
+  }
 
-    if (!opts.force) {
-      for (const auto& entry : fs::directory_iterator(projectRoot)) {
-        if (!entry.is_regular_file() || entry.path().extension() != ".toml")
-          continue;
-        if (rex::codegen::ManifestConfig::IsManifest(entry.path())) {
-          return Err<void>(ErrorCategory::IO,
-                           "Existing codegen manifest found. Use --force to overwrite: " +
-                               entry.path().string());
-        }
+  enum class RegeneratePolicy { AlwaysRegenerate, FirstInitOnly, RequiresForce };
+  struct Render {
+    std::string template_id;
+    fs::path out;
+    RegeneratePolicy policy;
+  };
+  std::string app_header = names.snake_case + "_app.h";
+  std::string manifest_file = names.snake_case + "_manifest.toml";
+  std::vector<Render> renders = {
+      {"init/cmakelists", projectRoot / "CMakeLists.txt", RegeneratePolicy::RequiresForce},
+      {"init/rexglue_cmake", projectRoot / "generated" / "rexglue.cmake",
+       RegeneratePolicy::AlwaysRegenerate},
+      {"init/main_cpp", projectRoot / "src" / "main.cpp", RegeneratePolicy::FirstInitOnly},
+      {"init/app_header", projectRoot / "src" / app_header, RegeneratePolicy::FirstInitOnly},
+      {"init/manifest_toml", projectRoot / manifest_file, RegeneratePolicy::RequiresForce},
+      {"init/cmake_presets", projectRoot / "CMakePresets.json", RegeneratePolicy::RequiresForce},
+  };
+
+  if (!opts.force) {
+    std::vector<std::string> blocked;
+    for (const auto& r : renders) {
+      if (r.policy == RegeneratePolicy::RequiresForce && fs::exists(r.out)) {
+        blocked.push_back(fs::relative(r.out, projectRoot).generic_string());
       }
+    }
+    if (!blocked.empty()) {
+      std::string msg = "Existing project files would be overwritten. Use --force to proceed:";
+      for (const auto& path : blocked) {
+        msg += "\n  - " + path;
+      }
+      return Err<void>(ErrorCategory::IO, msg);
     }
   }
 
@@ -223,22 +244,13 @@ Result<void> InitProject(const InitOptions& opts, const CliContext& ctx) {
   }
 
   REXLOG_TRACE("Generating project files...");
-  struct Render {
-    std::string template_id;
-    fs::path out;
-  };
-  std::string app_header = names.snake_case + "_app.h";
-  std::string manifest_file = names.snake_case + "_manifest.toml";
-  std::vector<Render> renders = {
-      {"init/cmakelists", projectRoot / "CMakeLists.txt"},
-      {"init/rexglue_cmake", projectRoot / "generated" / "rexglue.cmake"},
-      {"init/main_cpp", projectRoot / "src" / "main.cpp"},
-      {"init/app_header", projectRoot / "src" / app_header},
-      {"init/manifest_toml", projectRoot / manifest_file},
-      {"init/cmake_presets", projectRoot / "CMakePresets.json"},
-  };
   for (const auto& r : renders) {
-    if (!write_file(r.out, registry.render(r.template_id, jsonStr))) {
+    if (r.policy == RegeneratePolicy::FirstInitOnly && fs::exists(r.out)) {
+      REXLOG_DEBUG("  Skipped {} (preserving user content)",
+                   fs::relative(r.out, projectRoot).generic_string());
+      continue;
+    }
+    if (!write_file_atomic(r.out, registry.render(r.template_id, jsonStr))) {
       return Err<void>(ErrorCategory::IO, "Failed to write " + r.out.string());
     }
     REXLOG_DEBUG("  Created {}", fs::relative(r.out, projectRoot).generic_string());
