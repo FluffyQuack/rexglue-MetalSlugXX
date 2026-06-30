@@ -47,6 +47,10 @@ struct FunctionConfig {
   uint32_t end = 0;     // End address, exclusive (mutually exclusive with size)
   std::string name;     // Custom symbol name (empty = auto-generate sub_XXXXXXXX)
   uint32_t parent = 0;  // Parent function address (0 = standalone, non-zero = chunk)
+  std::string comment;  // TOML comment text harvested from the config (inline +
+                        // contiguous preceding lines), emitted above the
+                        // recompiled function. Empty = none. Lines are joined
+                        // with '\n' (no leading "#"/"//" markers).
 
   // Get effective size (prefers size over end)
   uint32_t getSize(uint32_t address) const {

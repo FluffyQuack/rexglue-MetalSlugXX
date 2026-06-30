@@ -401,40 +401,40 @@
 "0x82242E20" = { }
 "0x82242E80" = { }
 "0x82242EE0" = { }
-"0x82243EC8" = { }
-"0x82243F40" = { }
-"0x82243F80" = { }
-"0x822441D8" = { }
-"0x82244290" = { }
-"0x822442C0" = { }
-"0x822442F8" = { }
-"0x82244320" = { }
-"0x82244368" = { }
-"0x82244380" = { }
-"0x82244388" = { }
-"0x822443A8" = { }
-"0x822443C0" = { }
-"0x822443D8" = { }
-"0x82244488" = { }
-"0x82244490" = { }
-"0x82244498" = { }
-"0x82244510" = { }
-"0x82244540" = { }
-"0x82244598" = { }
-"0x822445C8" = { }
-"0x82244600" = { }
-"0x82244618" = { }
-"0x82244670" = { }
-"0x82244678" = { }
-"0x82244728" = { }
-"0x82244780" = { }
-"0x82244808" = { }
-"0x82244970" = { }
-"0x822449B0" = { }
-"0x822449F0" = { }
-"0x82244A28" = { }
-"0x82244A88" = { }
-"0x82244AE8" = { }
+"0x82243EC8" = { name = "ms_camera_layer_cmd_set_lookup_offsets" } # layer-script opcode: set scratch flags, read two indexed 0x82D74020 lookup values into +4/+6, clear +8/+A.
+"0x82243F40" = { name = "ms_camera_layer_cmd_add_offsets" } # layer-script opcode: add two halfword operands to scratch +4/+6 and advance the stream.
+"0x82243F80" = { name = "ms_camera_layer_cmd_apply_offsets" } # layer-script opcode: resolve pending scratch flags into the live layer and call ms_camera_layer_set_target_bounds.
+"0x822441D8" = { name = "ms_camera_layer_cmd_set_flags_and_delta" } # layer-script opcode: OR a flag mask into scratch +0x0C, load +8/+A delta halfwords, and advance.
+"0x82244290" = { name = "ms_camera_region_cmd_clear_tracked_object" } # region-script opcode: call 0x82236D60, then skip the command payload word.
+"0x822442C0" = { name = "ms_camera_region_cmd_set_limit_halfwords" } # region-script opcode: store four halfword limits into the 0x82D74690/46A2/475A/475E camera globals.
+"0x822442F8" = { name = "ms_camera_region_cmd_set_mode_bits" } # region-script opcode: repack one halfword into the controller mode byte at 0x82D39ADB.
+"0x82244320" = { name = "ms_camera_region_cmd_set_packed_pair" } # region-script opcode: pack two halfwords into 0x82D39AF0 and the controller +0x60 field.
+"0x82244368" = { name = "ms_camera_region_cmd_set_threshold_extra" } # region-script opcode: store a halfword to 0x82D74760.
+"0x82244380" = { name = "ms_camera_region_cmd_nop" }
+"0x82244388" = { name = "ms_camera_region_cmd_set_window_halfwords" } # region-script opcode: write halfwords to 0x82D39AF8 and 0x82D39B48.
+"0x822443A8" = { name = "ms_camera_region_cmd_set_region_limit" } # region-script opcode: store one halfword at 0x82D39B1C.
+"0x822443C0" = { name = "ms_camera_region_cmd_set_aux_stream_ptr" } # region-script opcode: cache the current stream pointer at 0x82D39AF4 and skip one payload word.
+"0x822443D8" = { name = "ms_camera_region_cmd_select_region_entry" } # region-script opcode: update a region-table entry, then refresh 0x82D746A0/4674 from the active stream limit.
+"0x82244488" = { name = "ms_camera_region_cmd_tail_82238110" } # region-script opcode: tail-call into 0x82238110.
+"0x82244490" = { name = "ms_camera_region_cmd_skip_word" } # region-script opcode: skip a 32-bit payload.
+"0x82244498" = { name = "ms_camera_layer_cmd_set_motion_from_camera" } # region-script opcode: select a layer, add command deltas to 0x82D74720, then call ms_camera_layer_set_motion.
+"0x82244510" = { name = "ms_camera_layer_cmd_set_step_speeds" } # region-script opcode: write layer +0x2E/+0x30 step-speed halfwords.
+"0x82244540" = { name = "ms_camera_layer_cmd_set_loop_enabled" } # region-script opcode: nonzero payload enables layer loop flags; zero clears the loop flag.
+"0x82244598" = { name = "ms_camera_region_cmd_set_layer_axis_mask" } # region-script opcode: masked update of 0x82D39AD8, read by ms_camera_update_parallax_layers.
+"0x822445C8" = { name = "ms_camera_region_cmd_bind_layer_source" } # region-script opcode: copy a source pointer from 0x82BEA870 into the selected 0x82BE8B18 layer-source slot.
+"0x82244600" = { name = "ms_camera_region_cmd_set_pending_threshold" } # region-script opcode: store a halfword to the pending threshold at 0x82D74764.
+"0x82244618" = { name = "ms_camera_region_cmd_branch_table_until_threshold" } # region-script opcode: set active stream/threshold globals, then skip a signed offset table.
+"0x82244670" = { name = "ms_camera_region_cmd_skip_halfword" }
+"0x82244678" = { name = "ms_camera_region_cmd_branch_on_table_value" } # region-script opcode: table lookup with signed operands; may rewind the stream and mark 0x82D74764 pending.
+"0x82244728" = { name = "ms_camera_region_cmd_wait_for_camera_x" } # region-script opcode: compare packed renderer camera X at 0x82D74750 with the operand; rewinds until reached.
+"0x82244780" = { name = "ms_camera_region_cmd_set_aux_stream_from_index" } # region-script opcode: select an indexed region stream and cache it for follow-up processing.
+"0x82244808" = { name = "ms_camera_region_cmd_ease_global_floats" } # region-script opcode: ease float globals 0x82DBA514/94AC toward percent-scaled operands and gate completion through 0x82D74764.
+"0x82244970" = { name = "ms_camera_region_cmd_wait_for_scroll_x" } # region-script opcode: compare packed scroll X at 0x82D7466C with the operand; rewinds until reached.
+"0x822449B0" = { name = "ms_camera_region_cmd_start_stage_script" } # region-script opcode: call 0x82249318 with three halfword operands.
+"0x822449F0" = { name = "ms_camera_region_cmd_set_scene_state" } # region-script opcode: call 0x82249370 with one halfword operand.
+"0x82244A28" = { name = "ms_camera_region_cmd_set_scaled_float" } # region-script opcode: scale one halfword through float constants and store 0x82DBC3B4.
+"0x82244A88" = { name = "ms_camera_region_cmd_set_layer_source_params" } # region-script opcode: select one of the 0x82BE8B18 layer-source records, OR a flag mask into +0x0C, then store six halfword params at +0x0E..+0x18.
+"0x82244AE8" = { name = "ms_camera_region_cmd_patch_indexed_region_entry" } # region-script opcode: patch the selected 0x82DBA510 indexed region stream terminator, rebuild bounds via 0x82243188, then refresh 0x82D746A0/4674 from the active stream.
 "0x82245F28" = { }
 "0x82245F40" = { }
 "0x82245FF0" = { }

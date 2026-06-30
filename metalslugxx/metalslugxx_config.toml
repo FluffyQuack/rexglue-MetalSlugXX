@@ -76,11 +76,37 @@
 # intermediate, then draws the intermediate into a letterboxed screen-space quad.
 # The final quad calculation originally reserves 5% top/bottom margin, producing
 # a centered 864x648 viewport; see the [[midasm_hook]] below.
-"0x823E6BB8" = { name = "ms_init_playfield_upscale_state" }      # zeroes state; default source size = 320x240
-"0x823E6C70" = { name = "ms_create_playfield_upscale_targets" }  # allocs 320x240 source target and 640x480 intermediate target
-"0x823E6DF0" = { name = "ms_upscale_playfield_to_640x480" }      # draws the 320x240 source into the 640x480 intermediate
-"0x823E7310" = { name = "ms_present_playfield_upscale" }         # draws the final intermediate quad to the 1280x720 frame
-"0x823E7830" = { name = "ms_ensure_playfield_upscale_targets" }  # lazy init for the playfield upscale targets
+# Global state wrapper 0x823E7920 passes &0x82C0B204 to the helpers below.
+# Key state fields: +0x04 scene color RT surface, +0x08 saved color RT surface,
+# +0x0C scene depth/stencil surface, +0x10 saved depth/stencil surface,
+# +0x14 320x240 sampled scene texture/RT, +0x1C 640x480 intermediate texture/RT,
+# +0x20 upscale vertex shader, +0x2C/+0x30 source size (320x240).
+# Guest-side source redirect hook points for the Buffer-B 60fps path:
+#   0x823E6DA8 calls ms_d3d_set_texture with r5=[state+0x14], programming the
+#   320x240 scene source fetch before ms_upscale_playfield_to_640x480.
+#   0x823E73C0 calls ms_d3d_set_texture with r5=[state+0x1C], programming the
+#   640x480 intermediate source fetch before the final/front quad at 0x823E7664.
+"0x823E6948" = { name = "ms_render_create_texture2d_out" }         # adapter around ms_d3d_create_texture2d; stores the returned handle through the caller's out pointer
+"0x823E69A0" = { name = "ms_render_create_surface_out_stub_a" }    # render-surface creation adapter around ms_d3d_create_render_surface
+"0x823E69F8" = { name = "ms_render_create_surface_out_stub_b" }    # paired render-surface creation adapter with the same call shape as 0x823E69A0
+"0x823E6A50" = { name = "ms_render_get_color_target_out" }         # adapter around ms_d3d_get_render_target; stores the current color target through an out pointer
+"0x823E6A98" = { name = "ms_render_get_depth_stencil_out" }        # adapter around ms_d3d_get_depth_stencil_surface; stores the current depth/stencil target through an out pointer
+"0x823E6AE0" = { name = "ms_render_clear_target_zero_ret" }        # adapter around ms_d3d_clear; forces the extra clear argument to 0 and returns success
+"0x823E6B08" = { name = "ms_render_create_descriptor_resource_out" } # adapter around ms_render_create_resource_from_descriptor; used by descriptor-backed shader/resource setup
+"0x823E6BA8" = { name = "ms_render_resource_release_tail" }        # tail wrapper into ms_render_resource_release
+"0x823E6BB8" = { name = "ms_init_playfield_upscale_state" }       # zeroes the playfield state block; default source size = 320x240
+"0x823E6BF8" = { name = "ms_destroy_playfield_upscale_state" }    # releases playfield state resources (+0x04/+0x0C/+0x18/+0x1C/+0x20)
+"0x823E6C70" = { name = "ms_create_playfield_upscale_targets" }   # creates the sampled 320x240 source texture/RT (+0x14), 640x480 intermediate (+0x1C), and upscale vertex shader (+0x20)
+"0x823E6D00" = { name = "ms_bind_playfield_upscale_draw_state" }  # binds source texture +0x14 via ms_d3d_set_texture at +0xA8, then upscale vdecl/PS/VS before the 320->640 quad
+"0x823E6DF0" = { name = "ms_upscale_playfield_to_640x480" }       # draws the 320x240 source into the 640x480 intermediate
+"0x823E6F00" = { name = "ms_restore_playfield_saved_targets" }    # binds saved color/depth surfaces (+0x08/+0x10) and clears the present-ready byte
+"0x823E70A0" = { name = "ms_present_draw_aux_textured_quads" }    # optional present-side overlay called from ms_present_playfield_upscale when [[0x82D41B40]+0x280] is set; binds globals 0x82D2EE04/0x82D2EE08 and emits two screen-space textured quads before the final +0x1C source bind
+"0x823E7310" = { name = "ms_present_playfield_upscale" }          # front/final upscale: re-runs 320->640 if ready, binds source +0x1C via ms_d3d_set_texture at +0xB0, draws the 1280x720-frame quad, then calls the post-viewport overlay
+"0x823E7748" = { name = "ms_bind_playfield_saved_targets" }       # lightweight saved-target bind used by the render-task present/draw helper
+"0x823E77A8" = { name = "ms_reset_playfield_present_state" }      # resets sampler/device state after helper draws and clears the present-ready byte
+"0x823E7830" = { name = "ms_ensure_playfield_upscale_targets" }   # lazy init: snapshots current color/depth into +0x08/+0x10, creates scene color/depth surfaces at +0x04/+0x0C, then creates upscale targets
+"0x823E7920" = { name = "ms_ensure_global_playfield_upscale_targets" } # tail wrapper for ms_ensure_playfield_upscale_targets(&0x82C0B204)
+"0x823F8570" = { name = "ms_draw_playfield_post_viewport_overlay" } # receives the final viewport rectangle from ms_present_playfield_upscale, records it in globals, binds an overlay texture, and emits a quad
 
 # Sound / XACT path (RE'd 2026-06-17 from the XAudio imports and XACT bank/cue
 # object flow used by media\sounds\*.xgs/*.xsb/*.xwb). The game wraps a bundled
@@ -105,15 +131,884 @@
 
 # Sound event and cue dispatch. Event 99 resolves to ARC_SE cue index 41,
 # which is the XACT cue name "arcse041" used by the laser gun sound effect.
-"0x823E4DB0" = { name = "ms_sound_resolve_bank_cue_name" }          # Bank id + cue index to XACT cue-name pointer; bank 1, cue 41 resolves to ARC_SE arcse041
+"0x823E4DB0" = { name = "ms_sound_resolve_bank_cue_name" }          # Bank id + cue index to XACT cue-name pointer; bank 0 cue 1 resolves to SE se001, bank 1 cue 41 resolves to ARC_SE arcse041
 "0x823DF1C8" = { name = "ms_sound_resolve_packed_cue_name" }        # Unpack (bank << 12) | cue and resolve the XACT cue name
 "0x8256C8E0" = { name = "ms_sound_play_bank_cue_in_slot" }          # Resolve a bank/cue, obtain the XACT cue, track it in a playback slot, and start it
-"0x821F4620" = { name = "ms_sound_play_arcse_group_cue" }           # Sound-table wrapper; group 0 routes through ARC_SE, so cue 41 plays arcse041
-"0x82205AE8" = { name = "ms_sound_enqueue_event" }                  # Queue a sound event record from 0x82BD1700; events 42 and 99 both point at ARC_SE cue 41
-"0x822056A8" = { name = "ms_sound_update_event_queue" }             # Drain queued sound events and dispatch record bytes +2/+3 to ms_sound_play_arcse_group_cue
+"0x821F4620" = { name = "ms_sound_play_group_table_cue" }           # Sound-table wrapper; group 0 routes through ARC_SE, nonzero groups route through SE. Event 47 -> SE se001; event 99 -> ARC_SE arcse041.
+"0x82205AE8" = { name = "ms_sound_enqueue_event" }                  # Queue a sound event record from 0x82BD1700; event 47 resolves to SE cue 1 (se001), events 42/99 resolve to ARC_SE cue 41.
+"0x822056A8" = { name = "ms_sound_update_event_queue" }             # Drain queued sound events and dispatch record bytes +2/+3 to ms_sound_play_group_table_cue
 "0x82205D30" = { name = "ms_sound_stop_event" }                     # Remove/stop an active sound event by event id
 "0x82334AF0" = { name = "ms_laser_sound_start" }                    # Set the object's laser-sound bit, increment the active laser count, and enqueue event 99
 "0x82334B30" = { name = "ms_laser_sound_stop" }                     # Clear the laser-sound bit and stop event 99 when the last active laser releases it
+
+# ---------------------------------------------------------------------------
+# 2D sprite / primitive rendering library.
+#
+# The game draws everything (pixel-art sprites + UI) as hardware quads into the
+# 320x240 source target via a small wrapper over the Xbox 360 inline-draw API.
+# Three layers, named below:
+#
+#   (1) Device wrapper  — the D3DDevice_BeginVertices/EndVertices/SetTexture
+#       inline helpers (out-of-line in this build). Device object is the global
+#       at [gpu_base+0x1304] (=[0x82D41304]), passed as r3 to every call.
+#   (2) Cached resource binders — resolve a guest resource handle, set the GPU
+#       state only if it changed, and cache the current value at [gpu_base+...].
+#   (3) Immediate-mode primitives + the textured-sprite batch system.
+#
+# All three layers were identified by their BeginVertices(prim,count,stride)
+# signatures and vertex writes. Xbox D3DPRIMITIVETYPE: 3=LINESTRIP, 6=TRIANGLEFAN,
+# 8=RECTLIST, 13=QUADLIST. Names only (codegen auto-sizes)
+
+# (1) Device wrapper (inline D3D draw primitives).
+"0x82435B20" = { name = "ms_d3d_create_texture2d" }       # create a renderable/sampled texture resource; used for the 320x240 scene and 640x480 intermediate
+"0x82435C40" = { name = "ms_d3d_create_render_surface" }  # create a color/depth surface object; ms_ensure_playfield_upscale_targets stores these at state+0x04/+0x0C
+"0x82439218" = { name = "ms_d3d_get_render_target" }      # AddRef and return the current color render target slot (r4 = color index)
+"0x82439260" = { name = "ms_d3d_get_depth_stencil_surface" } # AddRef and return the current depth/stencil surface
+"0x8243A840" = { name = "ms_d3d_set_render_target" }      # SetRenderTarget(r4 color index, r5 surface); setup_playfield_target passes state+0x04
+"0x82439F58" = { name = "ms_d3d_set_depth_stencil_surface" } # SetDepthStencilSurface(r4 surface); setup_playfield_target passes state+0x0C
+"0x8243CCC0" = { name = "ms_d3d_begin_vertices" }   # D3DDevice_BeginVertices(prim r4, count r5, stride r6); reserves space in the command/ring buffer, returns the vertex write pointer in r3
+"0x8243CC88" = { name = "ms_d3d_end_vertices" }     # D3DDevice_EndVertices; commits the reserved vertices ([dev+0x30] = [dev+0x3554])
+"0x82435EC0" = { name = "ms_d3d_set_texture" }      # D3DDevice_SetTexture(sampler r4, texture r5); copies the texture object's fetch constants into the device sampler block and writes the sampler resource slot at (r4+3180)*4
+"0x82436050" = { name = "ms_d3d_get_texture" }      # D3DDevice_GetTexture(sampler r4); returns the current sampler texture from (r4+3180)*4 and AddRefs it before returning
+"0x824383F0" = { name = "ms_d3d_set_sampler_mag_filter" } # sampler filter state wrapper; upscale bind path passes 0 for point sampling, final/front path later passes 1
+"0x82438598" = { name = "ms_d3d_set_sampler_min_filter" } # sampler filter state wrapper paired with ms_d3d_set_sampler_mag_filter
+"0x82436A88" = { name = "ms_d3d_set_alpha_blend_enable" } # blend-control wrapper; r4=1 enables source-alpha blending, r4=0 disables it. finish_playfield_render disables this after the real scene pass.
+"0x8243B7D8" = { name = "ms_d3d_resolve_texture" }  # resolve/copy the current EDRAM render target into texture r6; finish_playfield_render resolves to +0x14, 320->640 resolves to +0x1C
+"0x8243FF18" = { name = "ms_d3d_clear" }            # D3DDevice_Clear wrapper; setup_playfield_target clears the scene RT after binding it
+"0x82445FB8" = { name = "ms_render_create_resource_from_descriptor" } # descriptor-backed resource allocator; ms_create_playfield_upscale_targets uses it for the upscale vertex shader/resource at state+0x20
+"0x824333A8" = { name = "ms_texture_calc_tiled_alloc_units" } # texture/surface sizing helper; aligns dimensions/format and returns 0x1400-byte tiled allocation units
+"0x82434D40" = { name = "ms_render_init_texture_resource" } # initialize a sampled texture resource object and its six fetch-constant dwords; ms_d3d_create_texture2d uses this for state+0x14/+0x1C
+"0x82435038" = { name = "ms_render_init_surface_resource" } # initialize the render-surface sibling resource object; used by ms_d3d_create_render_surface for color/depth targets
+"0x82434440" = { name = "ms_texture_get_level_desc_raw" } # fill a texture level descriptor from a raw texture resource + mip level; decodes width/height/format fields from the packed fetch constants
+"0x82435D78" = { name = "ms_texture_get_level_desc" } # public texture descriptor query; follows wrapper resources to ms_texture_get_level_desc_raw when needed, otherwise decodes the texture object directly
+"0x8244A770" = { name = "ms_render_resource_add_ref" } # atomic render-resource AddRef helper; paired with ms_render_resource_release and used by ms_d3d_get_texture
+"0x8244B9D0" = { name = "ms_render_resource_release" } # refcounted render resource release; decrements the atomic count and runs final cleanup on zero
+
+# (2) Cached GPU resource binders (resolve handle -> object, set if changed).
+# pixel/vertex shader split is by adjacent device offsets 0x3248 / 0x3244.
+"0x8256A060" = { name = "ms_gfx_bind_vertex_declaration" }  # set vertex declaration at dev+0x2ED8 if changed; cached at [gpu_base+4880]
+"0x8256A0B8" = { name = "ms_gfx_bind_pixel_shader" }        # set pixel shader at dev+0x3248 if changed; cached at [gpu_base+4884]
+"0x8256A120" = { name = "ms_gfx_bind_vertex_shader" }       # set vertex shader at dev+0x3244 if changed; cached at [gpu_base+4888]
+
+# (3a) Immediate-mode 2D primitives (bind shaders, BeginVertices/EndVertices in
+# one shot; solid-color vertex format, no texture).
+"0x823F6A70" = { name = "ms_draw_fill_rect" }      # RECTLIST(3 verts) solid-color filled rectangle; input r3 = {x0,y0,scale,x1,y1}
+"0x823F6B58" = { name = "ms_draw_rect_outline" }   # LINESTRIP(5 verts) solid-color rectangle outline
+"0x823F6C90" = { name = "ms_draw_color_quad" }     # TRIANGLEFAN(4 verts) quad with per-vertex color; input = 4 x {color,x,y,_} records
+"0x823F6DB8" = { name = "ms_draw_line" }           # LINESTRIP(2 verts) solid-color line segment
+
+# (3b) Textured sprite batch system. Sprites are packed records flushed as
+# RECTLIST/QUADLIST quads; batches are split per texture/blend mode.
+"0x823F72B8" = { name = "ms_draw_sprite_batch" }      # main sprite renderer: (sprite_array r3, count r4) -> RECTLIST(stride 28: pos,color,uv); binds current texture from the -11899/-11900 slots
+"0x823F72A8" = { name = "ms_set_sprite_blend_mode" }  # store the current sprite blend/material select (0..2) at [0x82D2D185]; read by ms_draw_sprite_batch
+"0x823F77B0" = { name = "ms_build_palette_texture" }  # build/refresh a CLUT palette texture (256x256) from a source palette; 4-bit nibble expansion into a locked surface
+"0x823F79E0" = { name = "ms_set_active_palette" }     # store the active palette/sprite-list buffer pointer at [0x82D2D194]
+"0x823F8068" = { name = "ms_sprite_refresh_dirty_texture_pages" } # worker for the sprite texture-page uploader: lazily creates 128x128 page textures, locks each dirty page, expands indexed sprite bytes through the palette table into ARGB, unlocks, and records elapsed/status in the upload slot.
+
+# (3c) Deferred per-texture quad queue (auto-flushes when the texture changes).
+"0x823F7C30" = { name = "ms_queue_textured_quad" }   # (quad r3, texture r4); append a textured quad to the queue, flushing first if the texture differs
+"0x823F79F0" = { name = "ms_draw_quad_list" }        # flush the queued quads: bind shaders+texture, BeginVertices QUADLIST(13, stride 28) over the 0x54-byte records, reset count
+"0x823F7C10" = { name = "ms_reset_quad_list" }       # zero the queued-quad count ([..DAF0]) and current-texture ([..DAEC])
+"0x823F8030" = { name = "ms_flush_quad_list" }       # ms_draw_quad_list then ms_reset_quad_list
+"0x823F8338" = { name = "ms_draw_sprite_page_rect" } # immediate textured RECTLIST draw: bind point-sampled sprite shaders + texture page r4, convert the packed rect/UV record at r3 into 3 stride-28 vertices, then EndVertices.
+"0x823F8520" = { name = "ms_set_quad_modulate_color_raw" } # store a prepacked ARGB modulate color at [0x82C0B28C]; ms_set_quad_modulate_color is the byte-pack wrapper.
+"0x823F8550" = { name = "ms_get_quad_modulate_alpha" }     # return the high/alpha byte from the current packed quad modulate color.
+"0x823F8560" = { name = "ms_sprite_alloc_index_buffers_thunk" } # tiny tail-call wrapper into ms_sprite_alloc_index_buffers.
+"0x823F8770" = { name = "ms_select_present_overlay_texture" }   # bounds-check a 0..6 overlay slot and copy its texture handle into the active present-overlay globals.
+"0x823F87A0" = { name = "ms_draw_selected_present_overlay" }     # draw the selected present-overlay texture as an immediate fullscreen/page rect, then unbind texture slot 0.
+
+# (3d) Dynamic vertex/index buffer pool used by the sprite batcher.
+"0x823F6EA8" = { name = "ms_sprite_alloc_index_buffers" }  # lazily create the 8 dynamic index buffers ([0x82D2D174] array) and reset batch write state
+"0x823F71A8" = { name = "ms_sprite_build_quad_indices" }   # allocate the dynamic vertex buffers and fill the static quad index buffer (6 indices/quad, up to 4096 quads)
+"0x823F6F70" = { name = "ms_sprite_flip_dynamic_buffer" }  # flush+swap the active dynamic buffer (double-buffer toggle at [0x82D2D184])
+"0x823F7048" = { name = "ms_sprite_append_indices" }       # append a quad's 16-bit indices to the locked dynamic index buffer
+
+# (3e) Higher-level direct sprite/page draw frontends.
+"0x822031A8" = { name = "ms_background_clear_tile_sprite_map" } # clear the 40x32-stride halfword background/tile map at 0x82D7CB40; called by the scene build path before the direct tile batch renderer.
+"0x822031D0" = { name = "ms_background_draw_tile_sprite_batches" } # BACKGROUND/TILE PASS: called from ms_scene_render @0x822508A4; scans the 0x82D7CB40 tile map, builds packed sprite records in 128-entry chunks, flushes them through ms_draw_sprite_batch, then draws the small solid overlay rect pass.
+"0x82209B90" = { name = "ms_background_blit_tile_list_to_map" } # copy a 0xFFFF-terminated halfword tile list into the 0x82D7CB40 background/tile map with clipping and set dirty flag 0x82D7CB24.
+"0x82209C40" = { name = "ms_background_fill_tile_map_row" } # clipped row fill into the 0x82D7CB40 map: validates row 0..39, then tail-calls ms_background_fill_tile_map_rect with width=32,height=1.
+"0x82209C68" = { name = "ms_background_store_tile_clipped" } # clipped single-tile write into the 0x82D7CB40 background/tile map; uses the same 40x32 stride and sets dirty flag 0x82D7CB24.
+"0x8220A898" = { name = "ms_background_fill_tile_map_rect" } # fill a clipped rectangle in the 0x82D7CB40 halfword map with one tile value; row stride is 32 and every write sets dirty flag 0x82D7CB24.
+"0x8220A938" = { name = "ms_background_fill_tile_map_rect_inc16" } # rectangle fill variant that increments the tile value by 16 per column; used by packed tile-rect list expansion.
+"0x8220A9F0" = { name = "ms_background_blit_tile_rect_list_to_map" } # walk 0xFFFF-terminated {offset,tile,size} records and expand each through ms_background_fill_tile_map_rect_inc16.
+"0x82209CE8" = { name = "ms_background_project_obj_to_tile_cursor" } # convert an object's pixel position into 32x40 tile-map coordinates and derive the scan count used by scripted tile effects.
+"0x82209E18" = { name = "ms_background_blit_tile_list_down_step" } # object step: advance row +3, blit a caller-supplied tile list into 0x82D7CB40, and destroy when it scrolls past row 40.
+"0x82209E70" = { name = "ms_background_blit_tile_list_up_step" } # object step: advance row -3, blit a caller-supplied tile list into 0x82D7CB40, and destroy when it scrolls past row -30.
+"0x8220AA50" = { name = "ms_background_store_packed_tile_step_row" } # store one packed tile halfword into the tile map, set the dirty flag, and return the next-row linear index.
+"0x8220AFD0" = { name = "ms_background_read_tile_stream_op" } # decode one byte/escape opcode from a compressed background tile stream, updating the cursor and output halfwords.
+"0x8220B150" = { name = "ms_background_count_tile_stream_ops" } # count decoded background tile stream ops by repeatedly calling ms_background_read_tile_stream_op until the terminator.
+"0x8220B1E0" = { name = "ms_background_decode_tile_stream_to_map" } # decode a compressed background tile stream into 0x82D7CB40, advancing one map row per op and setting the dirty flag.
+"0x82206E68" = { name = "ms_render_draw_sprite_page_entry" } # higher-level page entry frontend used by the 0x821F9xxx render passes: resolves a page/tile record, applies global alpha, and emits one or two ms_draw_sprite_page_rect calls.
+"0x821F9038" = { name = "ms_render_flush_page_entry_queue_a" } # scene-render queue flush: count at 0x82DA9544, index list at 0x82DAB680, records at 0x82D966E8; draws via ms_render_draw_sprite_page_entry before the main sprite-list flush.
+"0x821F9230" = { name = "ms_render_flush_page_entry_queue_b" } # companion page-entry queue flush: count at 0x82DAB664, index list at 0x82DA94C0, records at 0x82DAB788; draws via ms_render_draw_sprite_page_entry before the main sprite-list flush.
+"0x821F90F8" = { name = "ms_render_flush_page_entry_queue_forced_unit_fields" } # page-entry queue flush for the 0x82CF1950 list; temporarily forces four record float fields to 1.0 while drawing, then restores them.
+"0x821FE328" = { name = "ms_render_flush_effect_quad_queue_a" } # scene-render effect/quad queue flush: count at 0x82DAA614, records at 0x82D95AE0, texture/id table at 0x82DA91A0; wraps 0x82207188/7198/7228.
+"0x821FF348" = { name = "ms_render_flush_effect_quad_queue_b" } # scene-render effect/quad queue flush: count at 0x82DCC7EC, records at 0x82DAA640, texture/id table at 0x82DCC820; wraps 0x82207230/7240/72D0.
+"0x821FFD80" = { name = "ms_render_flush_effect_quad_queue_c" } # scene-render effect/quad queue flush: count at 0x82DAB640, records at 0x82D97D60; wraps 0x822072D8/72E0/7438.
+"0x821FFDF0" = { name = "ms_render_update_screen_transform_globals" } # commit staged screen-transform state; copies rotation angle 0x82DDCA20 -> 0x82D8D672 and derives scale/clip fields used by rotated sprite/effect-quad expansion.
+"0x82207188" = { name = "ms_render_effect_line_queue_begin" } # begin hook for effect queue A: clears current effect alpha byte 0x82D8D66C before drawing 16-byte line records.
+"0x82207198" = { name = "ms_render_effect_line_queue_draw" }  # draw hook for effect queue A: unpacks RGB from the queue color, scales a 16-byte {x0,y0,x1,y1} record, and calls ms_draw_line.
+"0x82207228" = { name = "ms_render_effect_line_queue_end" }   # no-op end hook for effect queue A.
+"0x82207230" = { name = "ms_render_effect_rect_queue_begin" } # begin hook for effect queue B: clears current effect alpha byte 0x82D8D66C before drawing 32-byte outline records.
+"0x82207240" = { name = "ms_render_effect_rect_outline_queue_draw" } # draw hook for effect queue B: unpacks RGB, scales a 32-byte outline record, and calls ms_draw_rect_outline.
+"0x822072D0" = { name = "ms_render_effect_rect_queue_end" }   # no-op end hook for effect queue B.
+"0x822072D8" = { name = "ms_render_effect_color_quad_queue_begin" } # no-op begin hook for effect queue C.
+"0x822072E0" = { name = "ms_render_effect_color_quad_queue_draw" } # draw hook for effect queue C: folds 0x82D8D66C alpha into four packed colors, scales a 64-byte vertex/color record, and calls ms_draw_color_quad.
+"0x82207438" = { name = "ms_render_effect_color_quad_queue_end" } # no-op end hook for effect queue C.
+
+# ---------------------------------------------------------------------------
+# Entity render list (the per-frame sprite display list). (RE'd 2026-06-23.)
+#
+# Sitting ABOVE the immediate-mode sprite library above, this is the layer the
+# game logic talks to: each frame is cleared, every visible game object submits
+# its sprite(s) into priority-sorted layer buckets, then the whole list is
+# drained and emitted as textured quads through ms_queue_textured_quad/
+# ms_draw_sprite_batch. The list manager is a single global struct reached via
+# the pointer at [0x82D7B13C]; key fields (manager-relative):
+#   +0x5400  current entry counter (per pass)
+#   +0x5402  layer/entry count (u16; capacity 1536 = 0x600)
+#   +0x4750  camera/scroll offset used for world->screen transform
+#   +0x4800  sorted layer-index array (u16[]; iterated by the flush)
+#   +0x32008 active bucket entry count
+# Each layer record is 12 (0xC) bytes; each queued sprite entry is 0x68 bytes
+# ({texture, params, quad-data}). The system was identified by following the
+# producers/consumers of this struct and the calls into the sprite library.
+#
+# ---------------------------------------------------------------------------
+# 0x68 SPRITE ENTRY + LAYER LAYOUT (RE'd 2026-06-24, P4). Full decode + the
+# "no per-entry identity" verdict and its consequences for interpolation now live
+# in MSXX_60FPS_FUNCTION_TARGETS.md. Field summary for reference:
+#   LAYER RECORD (12 bytes, at mgr + layerIndex*12; layer-index array [mgr+0x4800],
+#     count [mgr+0x5402]): +0x02 u16 sort/range, +0x04 u8 tex id, +0x05 u8 entry
+#     count, +0x06 u8 layer alpha, +0x08 ptr entry-block base.
+#   0x68 ENTRY (entry-relative, stride 0x68): +0x00 u16 sort key (copied to +0x02 by
+#     ms_render_layer_stamp_texture), +0x02 u16 (emit r5), +0x04 u32 tex/palette id,
+#     +0x08/+0x0C, +0x14/+0x18, +0x38/+0x3C... f32 baked vertex screen X/Y (POSITION,
+#     absolute -- camera pre-applied), +0x1C u32 packed params (alpha bits 22..26 +
+#     color), +0x20/+0x24, +0x50/+0x54/+0x58... f32 baked UVs / further coords.
+#   => entry is a FULLY-BAKED world->screen float quad with NO object/pose back-ptr,
+#   keyed only by layer-bucket + insertion order. Emit-side off-frame interp is NOT
+#   viable; interpolate on the producer/pose side (native prev/current pair
+#   pose+0x20/+0x24 vs +0x18/+0x1C). See the MD for the chosen capture/replay plan.
+# ---------------------------------------------------------------------------
+#
+# --- producers: game objects -> render list ---
+"0x82236BB8" = { name = "ms_render_list_add_sprite" }    # universal "submit object sprite" API (50+ call sites, one per entity type): transforms the object's world pos to screen via the camera offset at [mgr+0x4750], builds the entry, calls ms_render_list_insert_sprite
+"0x82200170" = { name = "ms_render_list_insert_sprite" } # core insert (P4): takes screenX (r5), screenY (r6), sprite-id (r3), frame-record ptr (r4), obj back-ptr (caller stack +0x9c). Clips + scales to the active resolution (320x240 base), then EXPANDS the sprite into a fully-baked FLOAT QUAD (4 vertices, screen-space positions + UVs) written into a 0x68-byte entry in its priority/layer bucket. The world->screen transform (camera) is already applied by ms_render_list_add_sprite / ms_obj_anim_stream_emit_sprite, so the entry holds ABSOLUTE screen coords -- there is NO obj/pose back-pointer in the final entry (the obj r28 is used only at build time for the clip/scale/visibility decisions; it is NOT persisted). See the 0x68 ENTRY LAYOUT block below.
+# Rotation note: ms_render_list_insert_sprite rotates each baked corner when the
+# current rotation angle halfword is nonzero (0x82D8D672 on the main path, plus
+# a mirrored variant at 0x82DBA4F8). It indexes the s16 sin/cos table at
+# 0x8202FB10 with angle>>3 and applies ms_math_mul_fixed12_round to the four
+# corner deltas before storing the final float vertices.
+"0x821FC4E8" = { name = "ms_render_list_add_entry" }     # lighter append path (used by the UI/glyph renderer): bumps [mgr+0x5402], caps at 1536, fills one entry directly
+# Coverage check (2026-06-26): the only direct `bl ms_render_list_add_entry`
+# sites are 0x82202FF4 and 0x82203108, both inside ms_render_list_insert_sprite.
+# ms_render_list_insert_sprite itself has only two direct callers: the original
+# producer ms_render_list_add_sprite (0x82236D18) and the anim-stream producer
+# ms_obj_anim_stream_emit_sprite (0x82238C0C). A raw basefile scan found no
+# function-pointer table entry for 0x821FC4E8 (the lone byte hit at 0x821B9A40 is
+# an `lwz` instruction). Once both producers are captured/bracketed, there is no
+# visible third pose-sprite producer feeding top-level Entry ops at this layer.
+"0x822389E0" = { name = "ms_obj_anim_stream_emit_sprite" } # second high-level sprite producer: parses one 7-byte anim-stream sprite command, r3 = object, r4 = command ptr, r5 = anim state; reads obj+0x88 -> pose+0x18/+0x1c (same current world XY as ms_render_list_add_sprite), applies camera 0x82D74750/4754 + pose flip fixups, then calls ms_render_list_insert_sprite. Converged exit/return-next-command point is 0x82238C10.
+"0x82239160" = { name = "ms_obj_anim_stream_step" }        # per-object animation bytecode interpreter: r3 = object, r4 = anim stream state; dispatches opcodes, maintains state+0x00 current pc / +0x0e delay / +0x10 speed, and calls ms_obj_anim_stream_emit_sprite at 0x82239344 and 0x82239390.
+"0x822396A0" = { name = "ms_obj_anim_stream_step_primary" } # wrapper for the object's primary anim state: if obj+0x58 is non-null, tail-calls ms_obj_anim_stream_step(obj, obj+0x58), otherwise returns 0.
+"0x822795D0" = { name = "ms_player_register_body_sprite_cells" } # player body render registration helper: unregisters the current object cells, then registers the per-character torso/legs sprite cells from the halfword table passed in r4; the caller picks the normal/alternate table at 0x82BE025C/0x82BE028C.
+"0x82279720" = { name = "ms_player_step_body_anim_stream" }       # player wrapper around ms_obj_anim_stream_step_primary: stages player body-part offsets/state through scratch 0x82D8B0A0, advances obj+0x58, then writes the updated torso/legs offsets back to the player state.
+"0x822797A8" = { name = "ms_player_select_body_sprite_type" }     # maps the requested player body part/state (r4, usually state+0x32 after table remap) plus character id state+0x00 to an object sprite type and tail-calls ms_obj_set_type.
+"0x822390F8" = { name = "ms_obj_anim_stream_set_sequence" } # initialize/reset obj+0x58 from the object's anim table at obj+0x34: selects sequence r4, stores initial command ptr(s), and seeds state+0x10 from r5.
+"0x822389B8" = { name = "ms_obj_anim_stream_init_state" }   # initialize a standalone anim stream state: current/base command ptrs = r4, sequence/index field = r6, speed/delay seed = r5.
+"0x82239048" = { name = "ms_obj_anim_stream_run_type_sequence" } # run a typed animation stream: validates/loads the obj template table entry at 0x82DB9560, resolves sequence r4, then invokes the nested stream scanner below with budget/count r5.
+"0x82238E38" = { name = "ms_obj_anim_stream_scan_nested" }  # nested animation bytecode scanner used by ms_obj_anim_stream_run_type_sequence; skips/digests opcodes and calls ms_obj_anim_stream_emit_layer_batch for layer-list opcodes.
+"0x82238D30" = { name = "ms_obj_anim_stream_emit_layer_batch" } # decode nested layer halfword lists into temp list 0x82D748A0 and call ms_render_layer_stamp_texture(0x82206DB0); not a pose sprite producer.
+"0x82238928" = { name = "ms_obj_anim_cmd_toggle_hflip" }    # callback-table entry 0x82007CA0[0]: toggles obj+0x24 bit0 (sprite-command horizontal offset mirror) unless obj+0x06 == 7.
+"0x82238950" = { name = "ms_obj_anim_cmd_toggle_vflip" }    # callback-table entry 0x82007CA0[1]: toggles obj+0x24 bit1 (sprite-command vertical offset mirror).
+"0x82238968" = { name = "ms_obj_anim_cmd_store_word_b0" }   # callback-table entry 0x82007CA0[2]: reads four command bytes big-endian and stores the word at obj+0xB0.
+
+# Player body sprite / child-node helpers (RE'd 2026-06-26). The player body is
+# emitted through anim-stream child nodes rather than one direct add_sprite call:
+# registration binds per-character torso/legs cells into the grid, and the child
+# handler below keeps each part's pose/depth/anim stream in sync with its parent.
+"0x82279690" = { name = "ms_player_register_current_body_sprite_cells" } # choose the normal/alternate per-character body-cell table (0x82BE025C/0x82BE028C), index it by player state+0x34, then call ms_player_register_body_sprite_cells.
+"0x82279918" = { name = "ms_player_spawn_table_child" } # spawn/link a player child node from a caller-supplied table: bounds-check child slot r4, look up a template ptr, insert/place a child under the player at origin, copy the character id into child state+0x00, and prime sprite flags.
+"0x82279D10" = { name = "ms_player_state_body_anim_gravity_tail" } # callback/state handler: refresh player-indexed subsystems, ease pose+0x10 toward -22px/tick fixed, run ms_player_step_body_anim_stream, then tail through ms_player_state_common_update_tail.
+"0x82279FF0" = { name = "ms_player_body_part_child_anim_handler" } # torso/legs child-node handler: switch anim sequence 2/3 from g_player_pos_record bit0, validate the parent player state, compute child depth/pose offsets from per-character tables, ms_pose_apply, then ms_obj_anim_stream_step_primary.
+
+# Direct add_sprite producer helpers (RE'd 2026-06-26). These are the still-unnamed
+# functions behind known producer call sites listed in MSXX_60FPS_FUNCTION_TARGETS.md.
+#
+# HUD weapon-selection panel (RE'd 2026-06-27): bottom HUD object for the per-player
+# weapon stock/selection UI. The strip leaf below is the two-icon selector drawn at
+# the lower left for P1 and the lower/right HUD lane for the alternate player.
+"0x82228840" = { name = "ms_hud_weapon_panel_draw_counter_tiles" } # companion bottom-HUD tile renderer: reads the per-player halfword counter at 0x82D73F4E/0x82D73FA8, clamps it to 99, writes the fixed counter prefix tiles, then renders the two-digit value into the 0x82D7CB40 tile map.
+"0x82228B18" = { name = "ms_hud_weapon_select_draw_icon_strip" } # bottom weapon-selector strip: emits left cap sprite 139, up to two table-mapped weapon icon cels from the player HUD state (+0x5A/+0x5B...), and right cap sprite 141 via ms_render_list_add_sprite at camera-relative x=(72 or 198), y=32.
+"0x82228CA0" = { name = "ms_hud_weapon_panel_draw_meter_tiles" } # tile-map companion to the icon strip: expands the weapon stock/ammo meter rows from state+0x68/+0x6A and player side, using background tile helpers instead of add_sprite.
+"0x82229720" = { name = "ms_hud_weapon_panel_wait_for_player_ready" } # waiting/activation state for the weapon HUD node: when the owning player lane is enabled, spawns the panel child cels (122/124/126/128 or 4329/4330/126/128), then enters ms_hud_weapon_slot_range_update_draw.
+"0x8222A578" = { name = "ms_hud_weapon_panel_update" } # main active weapon-panel HUD handler: initializes lane tile anchors, calls the icon strip + meter/counter renderers, handles highlight/count changes, and keeps the bottom HUD tile state in sync.
+"0x8222AD38" = { name = "ms_hud_weapon_panel_start_selection" } # transition/start handler for the weapon panel: refreshes player HUD state, consumes the selection countdown byte, pulses state+0x6D for the strip animation, spawns/updates the child widget, then tail-calls the active update.
+"0x8223C9F0" = { name = "ms_obj_sprite_slots_prepare_frame" }   # common slot-render setup: ms_pose_apply, toggle a frame/parity byte at obj+0xC0+0x18, choose obj+0x26 from obj+0x2C/0x2D, and reset the slot cel cursor at +0x10.
+"0x8223CA50" = { name = "ms_obj_sprite_slots_advance_cel" }     # advance obj+0xC0+0x10 by the selected cel record's delta; no render submission.
+"0x8223CA80" = { name = "ms_obj_sprite_slots_emit_indexed_cel" } # (obj, xoff r4, yoff r5, slot r6): resolve slot -> cel id through obj+0xC0 tables, skip 0xFFFF, set pose mode 2, then tail-call ms_render_list_add_sprite.
+"0x8223CAC0" = { name = "ms_obj_sprite_slots_advance_cel_alt" } # sibling cel-cursor advance helper with the slot index passed in r4; no render submission.
+"0x8223CAF0" = { name = "ms_obj_emit_sprite_slots_masked" }     # handler: prepare frame, maintain active slot masks/timers at obj+0xC0+0x1C/+0x1D/+0x1E, and emit enabled slots via add_sprite at 0x8223CCDC.
+"0x8223CD40" = { name = "ms_obj_emit_sprite_slots_linear" }     # handler: integrate pose, walk the object's sprite slots, and emit enabled cels via add_sprite at 0x8223CE50.
+"0x8223CE98" = { name = "ms_obj_emit_sprite_slots_offset_list" } # handler: run pre-placement setup, use per-slot offset halfwords at obj+0xC0+0x4E, emit via add_sprite at 0x8223CF6C, then validate the object tree link.
+"0x8223D050" = { name = "ms_obj_emit_sprite_slots_timed_linear" } # timed linear variant; emits enabled slots via add_sprite at 0x8223D110, then switches handlers when the countdown expires.
+"0x8223D180" = { name = "ms_obj_emit_sprite_slots_timed_offsets" } # timed offset-list variant; emits enabled slots via add_sprite at 0x8223D258, then switches handlers when the countdown expires.
+"0x8223D2E8" = { name = "ms_obj_emit_sprite_slots_expanding_offsets" } # slot effect variant: updates per-slot x/y offsets through 0x822484E0, emits via add_sprite at 0x8223D4B8, and restores the base offsets afterward.
+"0x8223D548" = { name = "ms_obj_emit_sprite_slots_fading_offsets" } # slot effect variant: counts per-slot timers down, derives obj+0x1E fade from the timer table, and emits via add_sprite at 0x8223D75C.
+"0x8223D830" = { name = "ms_obj_emit_sprite_slots_wave_offsets" } # slot effect variant: derives y offsets from table 0x8201A3D0 using the slot timer, emits via add_sprite at 0x8223D960, and advances the timer.
+"0x82229BA8" = { name = "ms_hud_weapon_slot_range_update_draw" } # weapon-panel slot-range update/draw handler: gates on parent slot state/global active masks, walks the state+0x0A..0x0B slot range, selects cel tables per side/active bit, submits each active slot via add_sprite at 0x82229DF8/0x8222A044/0x8222A2A4/0x8222A4F0, then advances its phase counter by 42 modulo 0x600.
+"0x8224C9D8" = { name = "ms_obj_emit_motion_arc_sprite" } # combined update/draw handler: steers/integrates a helper pose, derives signed motion cel 512/513, then submits it through add_sprite at 0x8224CCDC.
+"0x82256068" = { name = "ms_obj_emit_parent_selected_sprite" } # combined update/draw handler: commits pose, reads the parent state sprite id ([parent+0xC0]+0x14)-1, submits it at origin via add_sprite, then handles visibility/collision cleanup.
+"0x8229BD00" = { name = "ms_obj_emit_table_sprite_list" } # combined update/draw handler: commits pose, walks the static {sprite,xoff,yoff} halfword list at 0x82BE0628, and submits each row via add_sprite at 0x8229BD64 before spawning/freeing follow-up child nodes.
+"0x82236B88" = { name = "ms_render_list_clear" }         # PER-FRAME end-of-frame reset: zero [mgr+0x5402], [mgr+0x5400] and the [mgr+0x32008] bucket count. CADENCE PINNED (Blocker 1): sole caller is 0x82250cd8, the frame-END exit block (0x82250c88) of ms_scene_update -- which is the COMMON per-frame path (ms_scene_substate_step 0x8223c6c8 returns 1), so ms_scene_update runs one frame then hits this clear and returns. Paired with ms_pose_tick_advance (0x8223e5b0) one instruction earlier (0x82250cd4) -> both are PER-FRAME (this re-validates the P3 native prev/current pose-snapshot-per-tick assumption).
+# Per-FRAME BEGIN orchestrator (called at the TOP of each one-frame ms_scene_update
+# call, before the scroll advance + object pass): finalizes/sorts last frame's layer
+# ordering (so it can be flushed this frame), then zeroes the bucket arrays for the
+# new frame's submissions. CADENCE PINNED (Blocker 1): sole caller is 0x82250a48 at
+# the top of ms_scene_update, and ms_scene_update is ONE-FRAME-PER-CALL (re-entered
+# each frame via scene table 0x8200750c -> ms_scene_state_run), so begin_frame runs
+# ONCE PER FRAME -- NOT once per scene. (Proof: the per-frame zero MUST be here since
+# the loop body 0x82250a88 has no list-zero call; a multi-frame internal loop would
+# leave frames 2..N un-zeroed.) (RE'd 2026-06-23; cadence corrected 2026-06-24.)
+"0x82236B60" = { name = "ms_render_list_begin_frame" }       # calls ms_render_list_sort_seal_batch(0) then ms_render_list_zero_buckets; sole caller 0x82250a48 (top of ms_scene_update) => PER-FRAME
+"0x82236798" = { name = "ms_render_list_sort_seal_batch" }   # PER-BATCH (NOT once-per-frame; 60+ call sites): insertion-sort the pending submissions in the sorted layer-index array ([mgr+0x5400], live count [mgr+0x5404]) into [mgr+0x4800], stamp the pass/sub-pass id arg (r3) at [mgr+0x6406], then RESET the per-batch live counter [mgr+0x5404]=0. begin_frame calls it with r3=0; every rendering section that wants its accumulated quads sealed/ordered calls it too. (Renamed from ms_render_list_finalize_layers 2026-06-24, Blocker 1 -- the old name implied a once-per-frame finalize, which is wrong.)
+"0x82236898" = { name = "ms_render_list_zero_buckets" }      # zero the per-layer bucket arrays ([mgr+0x5400] and [mgr+0x5600], 128 words each) then rebuild bucket counts, gated on the layer count [mgr+0x5402]. SOLE caller is ms_render_list_begin_frame (0x82236b74) => also PER-FRAME (via begin_frame).
+
+# --- consumer: render list -> GPU quads ---
+"0x821FC5E8" = { name = "ms_render_list_flush" }         # drain: walk the sorted layer array ([mgr+0x4800], count [mgr+0x5402]); for each layer set its alpha, then walk its 0x68-byte sprite entries, switching texture/palette on change, and emit each via ms_render_emit_sprite_quad. Brackets the run with ms_reset_quad_list / ms_flush_quad_list
+"0x82207450" = { name = "ms_render_emit_sprite_quad" }   # (entry-quad ptr r3 = entry+0x08, layer r4, entry+0x02 halfword r5) convert one already-baked 0x68 sprite entry to a textured quad and enqueue via ms_queue_textured_quad (0x823F7C30). FIELD DECODE (offsets are entry-relative; emit's r3 = entry+0x08): reads the per-object alpha [0x82D7D66C] (5-bit, 0..31), scales to 0..255 via (a>=31?255:a*255/31), folds it into the global quad modulate color through ms_set_quad_modulate_color (0x823F8530, stored at [0x82C0B28C]); then reads the entry's baked vertex floats -- POSITIONS at entry+0x08/+0x0C (v0 x/y), +0x14/+0x18, +0x38/+0x3C... and UVs at +0x20.., +0x50.. -- multiplies positions by the const at [0x82007580] and UVs by [0x820037C4], converts to packed 16.16/16-bit, and writes the host quad. Positions are ABSOLUTE screen coords (camera pre-applied). The packed params word at entry+0x1C carries the alpha bits (read per-layer by ms_render_set_object_alpha) + texture color; entry+0x04 = texture/palette id.
+"0x823F8530" = { name = "ms_set_quad_modulate_color" }    # (a r3, r4, r5, r6) pack ARGB into one word and store the global vertex modulate color at [0x82C0B28C] (getter = 0x823F8550); ms_render_emit_sprite_quad calls it to apply the per-object alpha scale to the quad
+"0x82207170" = { name = "ms_render_bind_texture_palette" } # tail-call 0x823F79E0; bind a sprite entry's texture/palette -- called by ms_render_list_flush only when the entry's [+0x04] texture id changes from the cached one
+"0x82207160" = { name = "ms_render_batch_begin" }          # tail-call ms_reset_quad_list (0x823F7C10); reset the quad batch before draining the list
+"0x82207180" = { name = "ms_render_batch_end" }            # tail-call ms_flush_quad_list (0x823F8030); flush the final quad batch after draining the list
+"0x82206DB0" = { name = "ms_render_layer_stamp_texture" }  # per-layer PRE-pass (first loop of ms_render_list_flush): walk the layer's [+0x05]-count 0x68-byte entries, stamp each entry's texture/palette id at [+0x04] from the layer record and propagate the [+0x00] halfword to [+0x02], stride 0x68
+"0x82206D90" = { name = "ms_render_reset_draw_counters" } # zero the per-frame quad/draw counters [0x82DAA61C] and [0x82DAC380]
+"0x82206E38" = { name = "ms_render_set_object_alpha" }    # extract the object alpha bits, store the global per-object alpha scale at [0x82D7D66C], return whether the object is visible
+"0x82207168" = { name = "ms_render_set_layer_alpha" }    # set the current layer alpha for the sprite batcher (tail-call into 0x823F7028)
+
+# --- camera/scroll "tracked object" cluster (RE'd 2026-06-24) ---
+# Two scene-graph globals hold the object(s) the camera/scroll system references:
+#   0x82D8B124  tracked object A -- read by ms_tick_flag_gated_obj_lookup and the
+#               on-screen marker state machine; reset to sentinel 0x82BD7BE8.
+#   0x82D8B130  tracked object B -- the camera FOLLOW reference; set in
+#               ms_gameplay_init, advanced each frame toward the scroll limit.
+# Relevant to the 60fps goal as the scroll-INPUT side: these define what the
+# camera/scroll tracks, i.e. the input ms_world_advance_scroll smooths each tick.
+# (The render-time world->screen camera is still constant per
+# ms_render_list_add_sprite, so interpolating the pose alone remains sufficient.)
+"0x82236d60" = { name = "ms_render_set_tracked_object" }        # store the follow reference at 0x82D8B130 (null -> sentinel 0x82BD7BF4); called by ms_gameplay_init
+"0x82236d88" = { name = "ms_render_reset_tracked_object_state" } # stage-init reset: object A at 0x82D8B124 (null -> sentinel 0x82BD7BE8) + the 0x82D8B128/2C/34/38 fields + flags 0x82D27650=0 / 0x82D27651=-1
+"0x82236de8" = { name = "ms_render_tracked_marker_enabled" }    # return 255 if the marker-active flag 0x82D27651 is set, else 0
+"0x82236e08" = { name = "ms_render_advance_tracked_object" }    # walk object B (0x82D8B130) forward through the depth-sorted sibling list (key +0x12) to the first node at/after the scroll limit 0x82D7466C; store it back
+"0x82236e48" = { name = "ms_render_project_record_xy" }         # (record r3, out_x r4, out_y r5): write record+0/+2 (x/y) to *r4/*r5, then conditionally add camera X (0x82D74750) per record+0x4 bit1 / camera Y (0x82D74754) per bit0
+
+# --- per-frame orchestration ---
+"0x823F9C78" = { name = "ms_render_frame" }   # (do_scene r3): when do_scene!=0, set up the 320x240 playfield target (0x823E6F60) -> ms_scene_render -> finish (0x823E7018); ALWAYS bumps the global frame counter [0x82D2A860] and runs ms_task_scheduler (+ 0x823E42B0). Called once per game tick by ms_update_and_render_frame, which passes do_scene=255 only on the first loop pass.
+"0x82250390" = { name = "ms_scene_render" }   # render the scene into the playfield: configure the viewport/border, flush page/effect queues and the foreground sprite list, then call ms_background_draw_tile_sprite_batches at 0x822508A4 for the background/tile pass.
+# The other two legs of ms_render_frame's do_scene trio (bl @0x823f9cb0/b8), named
+# so the 60fps off-pass driver can REX_IMPORT and re-invoke them to re-draw the
+# lerped scene into the 320x240 EDRAM. Both are void() at the call site (no args set).
+# ms_setup_playfield_target reads the global playfield state at 0x82C0B204:
+#   SetRenderTarget(0, [state+0x04]) -> SetDepthStencilSurface([state+0x0C])
+#   -> Clear(flags=0x1F, color=0xFF000000) -> render-state setup.
+# It does NOT consult the render-task manager at 0x82D41A70; the scene target
+# descriptor inputs are the explicit color/depth surface pointers above.
+"0x823E6F60" = { name = "ms_setup_playfield_target" }   # bind the 320x240 scene color/depth surfaces from 0x82C0B204 and clear before ms_scene_render
+"0x823E7018" = { name = "ms_finish_playfield_render" }  # post-scene device bookkeeping (state sets + bl 0x8243b7d8(r4=256) + [ctx+1]=1)
+"0x82250A38" = { name = "ms_scene_update" }   # ONE FRAME PER CALL, re-entered per frame (CORRECTED 2026-06-24, Blocker 1 -- supersedes the earlier "per-SCENE main loop" reading). TOP (0x82250a48) calls ms_render_list_begin_frame ONCE; loop body at 0x82250a88 calls ms_update_and_render_frame (one rendered frame) + scene state machine + input poll; then ms_scene_substate_step (0x8223c6c8 @0x82250bd0) returns the new sub-state byte. COMMON PATH: it returns 1 (its default, 0x8223c810) -> bne @0x82250be8 taken -> block 0x82250c88 bumps the frame counters, runs ms_pose_tick_advance (0x8223e5b0) + ms_render_list_clear (0x82236b88) + ms_reset_current_global_node, then RETURNS (0x82250d18). So steady state = EXACTLY ONE rendered frame per call. The back-edges to 0x82250a88 (0x82250c14/0x82250c54) fire ONLY when 0x8223c6c8 returns 0 (rare non-advancing sub-step); teardown exit 0x82250c58 only when ms_scene_should_exit (0x821F1888) is nonzero. PROOF of one-frame-per-call: begin_frame (finalize+zero list) is at the TOP outside the loop and the loop body has NO list-zero call, so a multi-frame internal loop would leave frames 2..N un-zeroed. Re-entered every frame via scene table 0x8200750c -> ms_scene_state_run (0x82250d20) -> ms_scene_update.
+
+# --- frame/tick driver (cadence RESOLVED 2026-06-24; full write-up in the MD) ---
+# CALL STACK (top->bottom):
+#   scene-descriptor table @0x82007508  (data-driven; run_fn @0x8200750c)
+#     -> ms_scene_state_run    0x82250d20  (scene-table run thunk: refresh type-tag +
+#                                           HUD/root state, then calls scene_update)
+#        -> ms_scene_update     0x82250a38  (ONE FRAME per call, re-entered per frame)
+#           -> ms_update_and_render_frame 0x82250988  (ONE rendered frame, N passes)
+#              -> N x ms_render_frame      0x823f9c78  (N = [0x82D29BA2], =2)
+#                 pass 0: do_scene=255 -> ms_scene_render -> re-flush of the list
+#                 pass>=1: do_scene=0   -> scheduler/update only, re-present pass 0
+#                 every pass: ms_task_scheduler + ms_pump_render_queue, which yield
+#                             to the RENDER TASK FIBER (ms_render_task_fiber 0x823e4378)
+# The PRODUCER BUILD is NOT a synchronous callee of ms_update_and_render_frame: it runs
+# on the scheduler-driven render-task fiber (0x823e4378), advanced cooperatively by
+# ms_render_frame -> ms_task_scheduler / ms_pump_render_queue. The fiber's per-frame
+# body ms_render_task_draw_frame (0x823dfef0) runs the producer DRAW walk to completion
+# via the dispatcher ms_scene_draw_dispatch (0x822500b0, gated on draw-state byte
+# 0x82D7D615) -> ms_obj_draw_dispatch_step (0x822068f8), interleaved with present. So
+# producers @30Hz, present @60Hz. Off-pass interp plan in MSXX_60FPS_FUNCTION_TARGETS.md.
+"0x82250988" = { name = "ms_update_and_render_frame" }   # ONE rendered frame: pumps update subsystems (incl. ms_sound_update_event_queue 0x822056A8) then ms_render_frame per pass, iterating [0x82D29BA2] (=2) passes; do_scene = (r31==0?255:0) computed at 0x822509e4-ec so the scene re-flush runs on pass 0 only. Pass index r31 (advanced by [0x82DD0D80]) + count [0x82D29BA2] = the inter-tick phase for interpolation.
+"0x823E42B0" = { name = "ms_pump_render_queue" }   # per-pass render barrier (called at the tail of ms_render_frame): while ([[0x82D41B40]+0x24C] & 1) { clear the pending bit; ms_task_scheduler() } -- yields to the scheduler-driven render task (ms_render_task_fiber 0x823e4378) until its pending-work flag drains. This is where the off-thread present completes; it is why scene-draw is 30Hz but swap is 60Hz.
+"0x821f2078" = { name = "ms_offpass_update_dispatch" }   # the OFF-PASS-ONLY update call (gated on r31!=0 @0x822509c0 in ms_update_and_render_frame). Decoded 2026-06-24 (60fps Blocker 3, benign): a thin dispatcher on the scene-phase byte [0x82DD00E0] -- calls update routine 0x821f1e18(r3,r4=0) once (r3=1) normally, or twice (r3=0 then r3=1) when the phase is 7 or 8 (cmplwi 8/7 @0x821f208c/94). Touches NO render list and NO present, so repurposing the off-pass for the interpolation replay is safe; run the clear+replay+forced-render AFTER it.
+"0x82250900" = { name = "ms_render_set_pass_count" }      # store the pass-count byte at 0x82D29BA2; sibling of ms_render_get_pass_count and the reset helper below.
+"0x82250910" = { name = "ms_render_get_pass_count" }      # return the pass-count byte at 0x82D29BA2; ms_update_and_render_frame uses this as the r31 loop bound/divisor (=2 in-game).
+"0x82250920" = { name = "ms_render_inc_pass_count" }      # increment and return the 0x82D29BA2 pass-count byte; called by scene/frontend setup paths outside the steady in-game loop.
+"0x82250950" = { name = "ms_render_reset_pass_state" }    # reset the adjacent 0x82D29BA0/A2/A4/A6 pass-state bytes/halfwords and seed 0x82D29BA2=2 before the scene draw/update loop.
+
+# --- render-task present fiber / present-side transition loop (RE'd 2026-06-25) ---
+"0x823E41D0" = { name = "ms_render_task_present_fiber" } # sibling cooperative fiber to ms_render_task_fiber: waits for [0x82D2A8B0], loops { ms_render_task_draw_present_transition ; ms_present_playfield_upscale ; ms_task_scheduler } until [0x82D2A8B4] is set, then runs one final present, resets D3D state, calls slot +0x14, clears the rendered flag, and yields
+"0x823DEFE8" = { name = "ms_render_task_call_slot14" } # tail wrapper for [0x82D41B40] vtable+0x14; same callback slot ms_render_task_fiber invokes before ms_render_task_draw_frame
+"0x823DF0C8" = { name = "ms_render_task_draw_present_transition" } # state-dependent present prep keyed by [0x82C0AB74] and alpha/timer [0x82D2A898]; binds saved targets, draws the transition/backdrop helpers, then resets playfield present state
+"0x823DF5A0" = { name = "ms_render_present_transition_state_step" } # transition state machine called from scene logic; advances [0x82C0AB74]/[0x82D2A898], calls ms_render_frame(0), and drives fade/audio helpers during render-state transitions
+
+# --- render-task scene snapshot / resolve-adjacent dispatch (RE'd 2026-06-25, P2/P3) ---
+# The dynamic call in ms_render_task_draw_frame is [0x82D41A70]->vtable+0x10.
+# Startup stores the render-core subobject at main_object+0x288 into 0x82D41A70;
+# that subobject's vtable is 0x8202BF78, whose +0x10 slot resolves to 0x823E6460.
+# This layer snapshots/restores live scene globals and services pending async scene
+# work around the producer drain; it is adjacent to, but not yet the raw EDRAM bind.
+#
+# Constructor 0x823FBDB0 publishes the larger render-core singleton's subobjects:
+#   [0x82D41B40] = 0x82D2EE38 render-task global state record
+#   [0x82D41A70] = this+0x288, vtable 0x8202BF78 (the bctrl target below)
+#   [0x82D418F0] = this+0x8E8, sibling with the same 0x8202BF78 vtable
+#   [0x82D418F4] = this+0x1218, [0x82D418E4] = this+0x12B0
+# Important negative result for the EDRAM question: this object does not select the
+# 320x240 scene RT tile. The actual target bind uses the playfield state surfaces at
+# 0x82C0B204+0x04/+0x0C through ms_setup_playfield_target.
+"0x823FBDB0" = { name = "ms_render_core_ctor_publish_globals" } # constructs the render core and publishes the 0x82D41A70/0x82D41B40/0x82D418xx globals
+"0x823E6460" = { name = "ms_render_task_service_scene_resolve" } # vtable +0x10 for [0x82D41A70]; drains +0x658/+0x65C pending flags, calls snapshot/apply slots, waits on 0x8257B6C8
+"0x823E6350" = { name = "ms_render_task_apply_scene_snapshot_and_wait" } # vtable +0x0c; snapshots live scene state via +0x00, waits on 0x8257B380, clears 0x82D2A8F4
+"0x823E4EA0" = { name = "ms_render_task_snapshot_scene_state" } # vtable +0x00; copy current scene globals into [0x82D41A70] snapshot fields
+"0x823E5010" = { name = "ms_render_task_restore_scene_state" } # vtable +0x04; restore/apply [0x82D41A70] snapshot fields back to scene globals
+"0x823E53F8" = { name = "ms_render_task_scene_state_changed" } # compare [0x82D41A70] snapshot fields against live scene globals; returns dirty/nonzero
+"0x823E5160" = { name = "ms_render_task_get_snapshot_mode_byte" } # vtable +0x20; returns the saved byte at this+0x609
+"0x823E5168" = { name = "ms_render_task_build_scene_status_descriptor" } # vtable +0x24; fills a small status descriptor from this+0x604 and [0x82D41B40]+0x230
+"0x823E53E8" = { name = "ms_render_task_pack_scene_descriptor_flags" } # vtable +0x28; tail wrapper into the descriptor flag packer at 0x823FA4E8
+"0x823FAB88" = { name = "ms_render_task_get_normalized_scene_status_x" } # vtable +0x18; reads the 0x82DD00C6 byte via 0x823DF190 and divides by the X dimension table value - 1
+"0x823FABE0" = { name = "ms_render_task_get_normalized_scene_status_y" } # vtable +0x1C; reads the 0x82DD00C7 byte via 0x823DF198 and divides by the Y dimension table value - 1
+"0x823E51E8" = { name = "ms_render_task_mark_scene_state_dirty" } # sets [0x82D41B40]+0x8e0 to 0xff before the service pass
+"0x823E5200" = { name = "ms_render_task_clear_scene_state_dirty" } # clears [0x82D41B40]+0x8e0 after the service pass
+"0x823E5D10" = { name = "ms_render_task_init_scene_snapshot_state" } # initializes snapshot/resolve state fields around +0x610..+0x65c, including pending flags
+"0x823FA4E8" = { name = "ms_render_task_pack_scene_status_flags" } # packs the scene/status descriptor bits into the flag word returned through the vtable +0x28 wrapper
+"0x823FA7E0" = { name = "ms_render_task_release_common_resources" } # common release path for resource pointers owned by render-task subobjects
+"0x823FB8A8" = { name = "ms_render_task_common_state_ctor" } # common subobject ctor: sets base vtable and initializes event/resource state fields
+"0x823FBB68" = { name = "ms_render_task_noop_slot_08" } # vtable +0x08 stub for the 0x82D41A70 subobject
+"0x823FBB70" = { name = "ms_render_task_noop_slot_14" } # vtable +0x14 stub for the 0x82D41A70 subobject
+"0x823FBB78" = { name = "ms_render_task_snapshot_object_size" } # vtable +0x2C; returns 0x64C, matching the snapshot object footprint through +0x65C flags
+"0x823FAC40" = { name = "ms_render_task_get_inner_state" } # vtable +0x30; returns this+0x08
+"0x823FBB80" = { name = "ms_render_task_noop_slot_38" } # vtable +0x38 stub for the 0x82D41A70 subobject
+"0x823FBC08" = { name = "ms_render_task_scene_snapshot_dtor" } # vtable +0x40; resets to the base vtable and optionally frees the subobject
+"0x823FBCB8" = { name = "ms_render_task_scene_snapshot_release" } # vtable +0x44; releases subobject resources, including the common resource block
+"0x823EA3E8" = { name = "ms_scene_transition_dispatch_current_descriptor" } # tail near resolve path; probes 0x82574428 then dispatches current type-7/8 descriptor via 0x82574EC8/0x82575038
+"0x823EA548" = { name = "ms_scene_transition_dispatch_pending_descriptor" } # phase-8 pending-descriptor path; uses 0x82574378/0x82574428 before type-7/8 dispatch, fallback probe returns bool
+
+# --- PRODUCER-WALK ENTRY + frame re-entry (Blocker 1, RE'd 2026-06-24) ---
+# Resolves "which callee runs the build, and where the per-frame clear happens". The
+# producer DRAW walk runs on the cooperatively-scheduled RENDER TASK FIBER, not inline.
+# The render-list manager deref is [0x82D7B13C] (lwz -20164(0x82D80000)); the scene
+# DRAW/PHASE state lives in a SEPARATE struct at 0x82D7D5E0.. with the key bytes
+# 0x82D7D615 (draw-state: 0=build/init, 1=run producer walk, >1=other) and 0x82D7D659
+# (scene phase 0..4). Do not confuse the two structs.
+"0x823e4378" = { name = "ms_render_task_fiber" }       # the scheduler-driven RENDER TASK main loop (a cooperative fiber; loops forever). Waits on the ready flag [0x82D2A8B0] via ms_task_scheduler (0x823dfa28), then per iteration: ms_pump_render_queue (present barrier) -> bctrl the render-task object's vtable+0x14 ([0x82D41B40]) -> ms_render_task_draw_frame (0x823dfef0, the producer walk + present) -> set rendered flag [0x82D2A8B4]=255 + increment the counter at [0x82D2A860] (the same word P6 attributes to ms_render_frame -- both touch it; reconcile the exact cadence via a trace if it matters) -> ms_task_scheduler yield -> repeat. THIS is the "scheduler-driven render task" ms_pump_render_queue waits on. The producer build (ms_obj_draw_dispatch_step) is reached from here, which is why producers decouple (30Hz) from present (60Hz).
+"0x823dfef0" = { name = "ms_render_task_draw_frame" }  # render-task per-frame body: inits scene-build state ([0x82DBA508]/[0x82DB94A8]=-1), dispatches the scene phase ([0x82DD00E0]), calls ms_scene_logic_step (0x8237dac8), then runs the DRAIN LOOP at 0x823dff98 -> { ms_pump_render_queue ; bctrl an object's vtable+0x10 ([0x82D41A70]) ; ms_scene_draw_dispatch_thunk (0x82204ce0) } while the dispatcher returns nonzero. This is where the per-object node handlers (e.g. ms_obj_handler 0x8224faf0) chain through ms_obj_draw_dispatch_step (0x822068f8) and emit the sprite list.
+"0x822500b0" = { name = "ms_scene_draw_dispatch" }     # the PRODUCER-WALK DISPATCHER. Reads draw-state byte [0x82D7D615]: ==1 -> call ms_obj_draw_dispatch_step (0x822068f8, one walk step) and return 1; ==0 -> the BUILD/INIT path (0x822500f0: zero scene-build state [0x82D7D5E0..E3], advance, dispatch sub-init handlers 0x8224fa68.. on [0x82D7D659]); >1 -> 0x822501ec. Returns nonzero while there is more draw/build work, so the drivers loop on it.
+"0x82204ce0" = { name = "ms_scene_draw_dispatch_thunk" } # lone `b 0x822500b0` (tail-thunk into ms_scene_draw_dispatch); called from the render-task drain loops 0x823dffb8 / 0x8237dbd4.
+"0x8237dbc8" = { name = "ms_scene_draw_drain" }        # tiny driver: `while (ms_scene_draw_dispatch_thunk() != 0) ;` -- drain the producer walk to completion in one shot (used outside the present-interleaved render-task loop).
+"0x8237dac8" = { name = "ms_scene_logic_step" }        # per-frame scene LOGIC/update step (called from ms_render_task_draw_frame @0x823dff64): copies scene-config bytes, ms_sound/anim setup (0x8223ea90), polls input twice (0x821f2370 or 0x821f2298 by scene mode), sets [0x82D7D636]=1, then runs the game-logic substeps 0x82205a80 / 0x82204d28 / 0x82204b60. (Update side; the draw walk is the dispatcher above.)
+"0x8223c6c8" = { name = "ms_scene_substate_step" }     # per-frame scene SUB-STATE machine (called by ms_scene_update @0x82250bd0; result stored to scene_sub+0x0c). Reads scene phase [0x82DD00E0] + flags ([0x82D7BA66], 0x82239748, 0x82249fe8, 0x82227588) and returns the next sub-state byte. DEFAULT/common return = 1 (0x8223c810) -> drives ms_scene_update to finish the current frame and return; returns 0 only on rare non-advancing sub-steps (loop-back), or a transition code via 0x823ea6c8.
+"0x821f1888" = { name = "ms_scene_should_exit" }       # ms_scene_update per-frame predicate (called @0x82250bbc): nonzero -> take the teardown exit 0x82250c58 (-> ms_scene_phase_reset_draw 0x82236618 + return); zero -> continue the frame.
+"0x82236678" = { name = "ms_scene_phase_step" }        # scene-PHASE state machine (NOT a render-list fn): dispatches on phase byte [0x82D7D659] (0..3), walks the 4-entry table at [0x82D7BA30] (8-byte stride) testing flag bit 0x08, advances via 0x822398d8/0x82248cf0/0x82250220, and on completion calls ms_scene_phase_reset_draw (0x82236618). Called once per frame from ms_scene_update @0x82250bc8.
+"0x82236618" = { name = "ms_scene_phase_reset_draw" }  # set draw-state byte [0x82D7D615]=0 (back to the BUILD phase) and remap the scene phase byte [0x82D7D659] to its next value via a small switch (1/2/3 -> next; >3 is a no-op early return). Called from ms_scene_phase_step and the ms_scene_update teardown exit (0x82250c7c).
+"0x8224faf0" = { name = "ms_obj_scene_root_handler" }  # node+0x08 handler dispatched by the producer walk: rebuilds the global HUD node tree (ms_build_global_node_tree 0x82206ad0) and seeds draw state each frame, sets [0x82D7D63B]|=0x80, then TAIL-CHAINS into ms_obj_draw_dispatch_step (0x822068f8 @0x8224fbf8) so a single kickoff walks the whole sibling list (continuation-chained dispatch; see Priority 2 in the MD).
+
+# ---------------------------------------------------------------------------
+# PHASE COUNTER / present cadence (RE'd 2026-06-24, P6). Chosen phase source and
+# the full analysis are in MSXX_60FPS_FUNCTION_TARGETS.md. The three candidates:
+#   [0x82D29BA2]  PASS COUNT (=2) -- the loop bound/divisor in ms_update_and_render_frame
+#                 (reset to 2 on exit). The phase DENOMINATOR, not a counter.
+#   [0x82D2A860]  GLOBAL FRAME COUNTER -- sole writer ms_render_frame (0x823F9C78),
+#                 bumped once per pass (~60Hz); also latches a "rendered" flag=255 at 0x82D2A8B4.
+#   [0x82D44174]  SW VBLANK COUNTER -- sole writer ms_vblank_handler (0x8245E2F0),
+#                 incremented at hw vblank (true 60Hz display clock); also drains the
+#                 vblank-deadline callback ring at gpu_base+0x420C/+0x4210.
+# Present is VBLANK-LOCKED: the swap is scheduled into that ring by
+# ms_gpu_request_vblank_swap (below) => one present == one vblank. CHOSEN phase =
+# r31 / [0x82D29BA2] (pass index / pass count), both live in ms_update_and_render_frame.
+# ---------------------------------------------------------------------------
+"0x8245E408" = { name = "ms_gpu_request_vblank_swap" }   # GPU buffer-swap request: derefs the global device ptr ([0x8200092C]/[0x82000930]), bumps the swap-pending count at gpu_base+0x4184, computes a refresh-rate-based deadline from the vblank counter [gpu_base+0x4174], and inserts a deadline entry into the vblank-callback ring (gpu_base+0x420C) that ms_vblank_handler drains -> the present is gated to hardware vblank. No static callers (reached via a registered kernel/callback ptr). Proof the swap is vblank-locked (P6).
+
+# ---------------------------------------------------------------------------
+# 60fps interpolation map (RE'd 2026-06-23/24). The world->screen transform path.
+# Chosen seam + the capture/replay plan + the exact midasm injection points are
+# in MSXX_60FPS_FUNCTION_TARGETS.md. Reference layout:
+#
+# Object world position (decoded from ms_render_list_add_sprite):
+#   obj+0x88  -> pose ptr (lwz r8,136(r31)); the renderer reads position from here:
+#       pose+0x18  world X (16.16; renderer lhz reads the integer halfword @ 0x82236c34)
+#       pose+0x1c  world Y (16.16; lhz @ 0x82236c20)
+#       pose+0x20/+0x24  PREV-tick committed X/Y (snapshot by ms_pose_commit) -- the
+#                  native lerp endpoint; current = +0x18/+0x1c.
+#       pose+0x29  flip flags (lbz @ 0x82236c40; bit0 hflip, bit1 vflip; each -1 to
+#                  stay pixel-aligned after mirror)
+#   Camera globals the transform subtracts: 0x82D74750 X / 0x82D74754 Y. RESOLVED:
+#   their only writer is ms_camera_reset (zeroes them) -> renderer camera is a
+#   CONSTANT 0, and callers pre-add it to a per-caller offset so it cancels. => for
+#   interpolation the camera is a non-issue; interpolate pose+0x18/+0x1c only.
+#   Screen transform: sx = (poseX - camX) + argR5 ; sy = (camY - poseY) - argR6 + 240.
+#   CAVEAT: a SECOND copy of this transform lives in ms_render_set_anchor
+#   (0x82200070) -- the interpolation hook must cover it too.
+#
+# SEAM: ms_render_list_add_sprite (0x82236BB8), the universal world->screen
+# chokepoint (50+ call sites). Midasm hook @ 0x82236c38 (X in r3, Y in r5, pose in
+# r8) lerps prev->current by phase; see the MD.
+
+# Camera / scroll smoothing. Runs once per scene update before the object pass.
+"0x82238628" = { name = "ms_world_advance_scroll" }  # smooths the camera scroll toward its target (worldmgr+0x2404, 1/32-subpixel units) and writes the integer pixel scroll to [0x82D89AA0/A2/A4] (x/y/z >>5); then rebuilds the per-object collision/spatial grid. worldmgr singleton ptr is the global at 0x82D7B120 (sibling of the render-list mgr ptr at 0x82D7B13C). (Output addr corrected 2026-06-23: lis -32039 + -25952 = 0x82D89AA0, NOT 0x82D99AA0; all readers agree.)
+
+# --- camera / scroll command API (RE'd 2026-06-23) ---
+# The visible camera move is an *eased* "world scroll" living on the worldmgr
+# singleton (deref of [0x82D7B120]; base = lis -32040 + -20192). The scroll
+# sub-struct is at worldmgr_deref+0x2404 and is what ms_world_advance_scroll
+# plays out one step per scene update:
+#   +0x00/02/04  current scroll X/Y/Z   (>>5 of this is emitted to 0x82D89AA0/A2/A4)
+#   +0x06/08/0A  target delta X/Y/Z     (stored <<8 by ms_scroll_set_target)
+#   +0x0C/0E/10  per-step easing increment (target_delta / steps)
+#   +0x12        remaining step count   (decremented each tick by ms_world_advance_scroll)
+#   +0x14        active flag
+#   +0x1A..0x2F  22-byte saved-state backup (push/pop)
+#   +0x2C (off 0x2430)  mode byte        +0x30 (off 0x2434)  saved flag
+# This is the camera-motion driver: for the 60fps goal, the eased scroll between
+# its endpoints is exactly the kind of motion that wants render-time interpolation
+# (backgrounds + whole playfield ride this camera). See MSXX_RUNTIME_NOTES.md.
+"0x82237e00" = { name = "ms_scroll_set_target" }     # (dx,dy,dz each clamped to ±31, steps): command an eased camera scroll; fills +6/8/10 target, computes +0xC/0xE/0x10 per-step increment (delta/steps), sets +0x12 step count
+"0x82237d50" = { name = "ms_scroll_save_state" }     # memcpy the 22-byte scroll state (worldmgr+0x2404) into the +0x241A backup and set the saved flag (+0x2434=1)
+"0x82237d98" = { name = "ms_scroll_restore_state" }  # restore the scroll state from the +0x241A backup and clear the saved flag; re-seeds the current pos when no scroll is in progress
+"0x82237d30" = { name = "ms_scroll_set_mode" }       # store a byte to worldmgr+0x2430 (scroll mode/lock, adjacent to the scroll state)
+"0x82237d40" = { name = "ms_scroll_get_mode" }       # read the worldmgr+0x2430 scroll mode/lock byte
+
+# Per-player position record accessor (RE'd 2026-06-23; 93 call sites -- a core
+# accessor). Returns &g_player_pos_record[index]: index 0 -> 0x82D73F20, else
+# 0x82D73F28 (two 8-byte records, {x@+0 s16, y@+2 s16, ...}; written together by
+# the setter at ~0x822A4EE0). MSXX is 2-player co-op, so these are the two
+# players' tracked positions; a likely camera-follow / HUD input. Relevant to
+# the camera question above: if the live camera is derived anywhere, it is from
+# these, not from 0x82D74750 or 0x82D89AA0.
+"0x822A5390" = { name = "ms_get_player_pos_record" }  # (index r3) -> &g_player_pos_record[index] (0->0x82D73F20, else 0x82D73F28)
+
+# Renderer camera (0x82D74750 X / 0x82D74754 Y — the globals the world->screen
+# transform in ms_render_list_add_sprite subtracts) and the parallax layers.
+# No per-frame writer to 0x82D74750/4754 was found; movement is carried by the
+# stage camera controller / parallax globals named below.
+"0x82246b88" = { name = "ms_camera_reset" }                 # zero the renderer camera (0x82D74750/4754) and the parallax-layer scroll globals (0x82D74660/4688/4698/4762 and 0x82D29B10)
+"0x821f4fe0" = { name = "ms_camera_compute_view_floats" }   # read camera X (0x82D74750) / Y (0x82D74754) + viewport fields and build the floating-point view/scale params (fcfid/frsp/fmuls)
+
+# Stage camera controller / parallax-region cluster (RE'd 2026-06-26). The
+# stage states call ms_camera_controller_init when entering/resetting gameplay,
+# then ms_tick_camera_region advances this controller every gameplay tick. The
+# state block starts at 0x82D39AD8, with active camera/region pointers around
+# 0x82D39B10/9B2C/9B68 and the live parallax layer records at 0x82D744C0.
+"0x822432D0" = { name = "ms_camera_region_eval_active_stream" } # evaluate the active camera-region stream at 0x82D39B10 for a packed X/Y input; dispatches per-record handlers and returns the selected packed scroll value.
+"0x822433B8" = { name = "ms_camera_region_calc_scroll_window" } # calculate packed min/max scroll-window values from the active region stream; used by ms_camera_clamp_scroll_to_region before selecting the clamp target.
+"0x822435E0" = { name = "ms_camera_region_sample_stream_span4" } # sample the active region stream and write four packed span outputs; lower helper used by the cached-bounds updater below.
+"0x822436E0" = { name = "ms_camera_region_sample_stream_span2" } # sample the active region stream and write the current/target packed scroll span through two out pointers.
+"0x822437C0" = { name = "ms_camera_region_expand_cached_window" } # wrapper over ms_camera_region_sample_stream_span4 that expands the cached camera window at 0x82D74678.
+"0x82243DB8" = { name = "ms_camera_layer_script_state_reset" } # reset one parallax-layer script scratch record, reset the matching 0x88-byte layer, and seed its motion from the camera base at 0x82D74720.
+"0x82243E40" = { name = "ms_camera_layer_script_run" }       # run a halfword opcode stream for one parallax layer until a negative terminator, dispatching through the camera-layer command table.
+"0x82247928" = { name = "ms_camera_controller_init" }       # init/reset the stage camera controller from r3/r4/r5 stage parameters; zeroes renderer camera, seeds 160x120 center fields, clears region limits, and resets three 0x88-byte parallax layer records
+"0x82246cd0" = { name = "ms_camera_refresh_extents" }       # rebuild camera min/max extents from the current renderer camera and the stage scroll bounds; updates the 0x82D39AD8 controller fields used by region tests
+"0x82247590" = { name = "ms_camera_clamp_scroll_to_region" } # clamp/advance the live scroll position against the active camera region, update cached scroll copies, and feed the region-limit setter used by ms_tick_camera_region
+"0x82247380" = { name = "ms_camera_update_parallax_layers" } # update the three 0x88-byte parallax layer records from enable masks and per-region command streams, then apply their pose deltas
+"0x82244f28" = { name = "ms_camera_update_view_window" }    # combine region limits/current center into final camera view-window globals; also draws debug rectangles when the stage debug flag is enabled
+"0x82244bc8" = { name = "ms_camera_region_script_step" }    # step the active camera-region command stream at 0x82D39B68 while scroll has reached the pending threshold 0x82D74764
+"0x82244c80" = { name = "ms_camera_clear_active_region" }   # clear the active camera-region pointer 0x82D74668 and derive the next scroll-limit halfwords from the active region table
+"0x82244d30" = { name = "ms_camera_object_overlaps_region_rect" } # test one object against an 8-byte region rect, using camera-relative coords when the stage flag requests it; used by region trigger checks
+"0x82247220" = { name = "ms_camera_region_check_player_pair" } # test both player objects against two consecutive region rects (r3 and r3+8); returns 255 only when both players satisfy the trigger
+"0x822472c0" = { name = "ms_camera_region_check_players" }  # simpler region trigger: test both player objects against one 8-byte region rect
+"0x82247330" = { name = "ms_camera_set_signed_scroll_impulse_8" } # set the signed scroll impulse global 0x82D39B60 to +/-8, preserving its current sign
+"0x82247358" = { name = "ms_camera_set_signed_scroll_impulse_4" } # set the signed scroll impulse global 0x82D39B60 to +/-4, preserving its current sign
+"0x82247e78" = { name = "ms_camera_layer_reset" }           # reset one 0x88-byte camera/parallax layer record: clears pose, fractional accumulators, target pointers, and default speed bytes
+"0x82247ed8" = { name = "ms_camera_layer_set_motion" }      # tail wrapper over ms_pose_set_position_fixed: set a layer pose target/delta from raw fixed-point r5/r6 values
+"0x82247ee0" = { name = "ms_camera_layer_set_target_bounds" } # store layer bounds/source pointer fields and derive signed 1/16-pixel step halfwords at +0x38/+0x3A
+"0x82247f18" = { name = "ms_camera_layer_enable_loop_flags" } # set layer +0x80 control bits 0x81, enabling the looping/wrap path used by parallax updates
+"0x82247f28" = { name = "ms_camera_layer_clear_loop_flag" } # clear layer +0x80 bit0
+"0x82247f38" = { name = "ms_camera_layer_step_x" }          # advance a layer's X fractional accumulator by speed-scaled r4 and store the signed delta at +0x0C
+"0x82247f90" = { name = "ms_camera_layer_step_y" }          # advance a layer's Y fractional accumulator by speed-scaled r4 and store the signed delta at +0x10
+"0x82247fe8" = { name = "ms_camera_layer_apply_pose_delta" } # tail wrapper into ms_pose_integrate_commit for a layer pose
+
+# Stage-specific parallax/background-scroll object cluster (RE'd 2026-06-26 while
+# locating the stepped background path for 60fps off-pass redraws). These are the
+# extra per-stage writers/readers behind the parallax global called out in
+# MSXX_60FPS_GUEST_REDIRECT_PLAN.md: 0x82D74698 is advanced every tick by
+# ms_stage_parallax_scroll_parent_step, separate from the constant renderer camera.
+"0x82319890" = { name = "ms_stage_parallax_event_init" } # init a scripted stage parallax event: seed 0x82D74698 to 0x00F00000, reset local state, spawn paired child objects, then install ms_stage_parallax_event_step.
+"0x823194B8" = { name = "ms_stage_parallax_event_step" } # state machine for the init above; spawns timed child objects/effects and can command ms_scroll_set_target(-31,-31,-31,16) when its gate objects become active.
+"0x823330B8" = { name = "ms_stage_parallax_scroll_parent_step" } # live parent handler for a scrolling background/parallax set: seeds child pose from camera X, adds ms_stage_calc_parallax_scroll_delta to 0x82D74698, clamps it, and chooses/updates the active child segment.
+"0x82333028" = { name = "ms_stage_parallax_spawn_child_segment" } # create/configure one child segment from caller-provided source ptr, x/y, and delta bounds; stores pose current/prev fields plus callback payload at child state+0x1C.
+"0x82332C68" = { name = "ms_stage_parallax_child_segment_step" } # child segment handler installed by the parent; runs an optional state callback, updates visibility/sequence flags, and emits/updates the segment relative to parent scroll state.
+"0x82330E68" = { name = "ms_stage_calc_parallax_scroll_delta" } # sample the player/camera window (0x82249D10), clamp/ease against stage globals, update state+0x38, and return the per-frame delta added to 0x82D74698.
+"0x82331788" = { name = "ms_stage_find_far_scroll_child_in_view" } # scan child list for an unmasked object inside cameraX+r4 .. cameraX+r4+320, choosing the one farthest from the parent's state+0x3C anchor.
+"0x82331B60" = { name = "ms_stage_find_nearest_scroll_child" } # scan child list for the unmasked child nearest target X; fallback selector used when no in-view scroll child is active.
+"0x821fc760" = { name = "ms_scroll_speed_render_effect" }   # read the scroll-output globals (0x82D89AA0/A2/A4), accumulate |dx|+|dy|+|dz|, and ease a scroll-speed-driven render effect (divw by 765) — likely a camera motion/zoom-blur amount
+
+# Forced/auto-scroll command (state struct at 0x82DD0D40); ms_world_advance_scroll
+# calls the setter to push the level's automatic scroll.
+"0x821f1608" = { name = "ms_autoscroll_set" }   # set the auto-scroll speed (+0xC) and target/limit (+0x14) at 0x82DD0D40; returns whether it was previously idle
+
+# Big-endian read helpers used by the renderer to decode on-disk sprite-frame
+# tables (game data is stored big-endian; these byteswap on read).
+"0x82570568" = { name = "ms_bswap32" }       # reverse the 4 bytes of r3 (s32/u32 byteswap); used by ms_render_list_add_sprite to read a 32-bit sprite-frame table entry
+"0x82570598" = { name = "ms_read_be_float" } # load a big-endian float from [r3], byteswap, return in f1
+
+# Fixed-point angle/render math helpers used by clipping and rotated sprite
+# corner expansion. Angles are 16-bit circle units; render trig samples are
+# fixed-12 s16 values from the table at 0x8202FB10.
+"0x823DC940" = { name = "ms_math_mul_fixed12_round" } # signed fixed-12 multiply: round((s32 r3 * s32 r4) / 4096) using (product + 0x800) >> 12.
+"0x823DCD20" = { name = "ms_math_div_fixed12_round" } # fixed-12 ratio helper: returns round((r4 / r3) * 4096), used for clip/edge interpolation and angle-table indexing.
+"0x823DCAE0" = { name = "ms_math_vector_to_angle16" } # quadrant-aware vector-to-angle helper; uses ms_math_div_fixed12_round plus arctan table 0x8202FA08 and returns u16 angle units.
+
+# ---------------------------------------------------------------------------
+# Render-list submit-state / "anchor" effect cluster (RE'd 2026-06-23, on the
+# 60fps path; the 0x82200xxx neighbours of ms_render_list_insert_sprite 0x82200170).
+#
+# ms_render_list_insert_sprite's body (0x82200280+) applies an optional per-sprite
+# secondary/"anchor" effect: gated on a flag, it positions/alpha-fades a sprite
+# relative to a captured ANCHOR object's screen position. Most sprite types get
+# it; types 43/45/167/168/174 are excluded. The small functions below set/clear
+# that state. Two render-state globals (both adjacent to the per-frame draw
+# counter 0x82DAA61C):
+#   0x82DAA620  anchor-enable flag (insert_sprite skips the anchor block if 0)
+#   0x82DAA628  final per-sprite alpha-scale gate (read in the closing alpha math)
+# Anchor cluster (set together by ms_render_set_anchor): 0x82DCEA54 (r4 param),
+#   0x82DCEA56 (screen X), 0x82DCEA58 (anchor object ptr), 0x82DCEA5C (screen Y).
+#
+# RELEVANCE TO INTERPOLATION: ms_render_set_anchor (0x82200070) RE-IMPLEMENTS the
+# full world->screen transform from ms_render_list_add_sprite (reads pose at
+# obj+0x88: poseX @+0x18, poseY @+0x1c, flip @+0x29; subtracts camX/camY; +240 /
+# Y-flip). It is the SECOND copy of that transform in the image — any hook that
+# interpolates the add_sprite transform must mirror the change here.
+"0x82200070" = { name = "ms_render_set_anchor" }            # (obj r3, r4): capture obj + its computed screen X/Y into 0x82DCEA54/56/58/5C (2nd copy of the add_sprite world->screen transform); skipped when obj is the tree sentinel
+"0x82200040" = { name = "ms_render_reset_anchor" }          # zero the anchor cluster 0x82DCEA54/56/58/5C (no anchor active)
+"0x82200030" = { name = "ms_render_clear_anchor_enable" }   # clear the anchor-enable flag 0x82DAA620 (=0); insert_sprite then skips the anchor block
+"0x82200140" = { name = "ms_render_enable_alpha_scale" }    # set the per-sprite alpha-scale gate 0x82DAA628 (=1)
+"0x82200150" = { name = "ms_render_disable_alpha_scale" }   # clear the per-sprite alpha-scale gate 0x82DAA628 (=0)
+
+# ---------------------------------------------------------------------------
+# Display-object / entity BASE CLASS (RE'd 2026-06-23, on the 60fps path).
+#
+# This is the base class for every renderable game object: the EXACT struct
+# ms_render_list_add_sprite (0x82236BB8) consumes. Proof = the base ctor
+# ms_obj_init (0x82206190) writes precisely the fields add_sprite reads:
+# +0x1e/+0x1f = 255 (the per-frame counters), +0x20/+0x22 = 256, +0x40 = 255,
+# +0x32 = 0xffff, +0x2a = 1, +0x2b = 255, +0x24 = 0.
+#
+# Objects live in a DEPTH-SORTED doubly-linked tree (z-order): sort key = the
+# u16 at node+0x1c, sibling links node+0x10 (prev) / node+0x14 (next), parent at
+# node+0x18. Each node owns an embedded POSE sub-struct (pointer at node+0x88;
+# for the global nodes the pose is embedded at node+0x5C). Pose world position is
+# **16.16 fixed-point**: pose+0x18 = X, pose+0x1c = Y, each written as value<<16
+# (see ms_set_global_node_position), and the renderer's `lhz pose+0x18/+0x1c`
+# reads the HIGH (integer) halfword. => sub-pixel precision is already in the
+# data model — directly relevant to the 60fps render-time interpolation goal.
+#
+# Objects are allocated from a FREE POOL: head pointer [0x82DDCB0C], live count
+# [0x82DDCB04]. Slots are recycled on destroy (ms_obj_destroy), so raw object
+# pointers ARE reused across frames — this is the recycling the interpolation
+# snapshot map must key around (needs a spawn/generation id, not the pointer).
+# No per-object generation counter was found in the base ctor; the pool head +
+# count above are the concrete recycling mechanism. See MSXX_RUNTIME_NOTES.md.
+"0x82206190" = { name = "ms_obj_init" }                   # base display-object/entity ctor; sets every render-visible default add_sprite reads; inits the embedded pose + sub-objects reached via node+0x58
+"0x822062f8" = { name = "ms_obj_dtor_unregister" }        # dtor body: spatial-grid unregister (0x822385b8) + 0x82240468
+"0x82206330" = { name = "ms_obj_depth_compare" }          # compare two nodes' u16 depth/sort keys (node+0x1c); returns 0/255
+"0x82206350" = { name = "ms_obj_is_tree_sentinel" }       # test node+0x08 against the depth-tree sentinel vtable (list-end check)
+"0x822063a0" = { name = "ms_obj_tree_insert_child" }      # pop a node from the free pool [0x82DDCB0C], set depth = parent(node+0x1c)+1, link as a child of r11 in the sorted sibling list; bumps live count [0x82DDCB04]
+"0x82206430" = { name = "ms_obj_tree_insert_child_tail" } # tail-link variant of ms_obj_tree_insert_child (inserts via the parent's +0x14 link)
+"0x822065b8" = { name = "ms_obj_tree_find" }              # walk the depth-sorted sibling list to find the node matching a key (+0x1c) and ptr (+0x08)
+"0x82206600" = { name = "ms_obj_destroy" }                # full teardown: run the node+0xC callback list (bctrl), grid-unregister (0x822385b8) + 0x82240468, unlink from the depth tree, recycle child nodes back to the pool, decrement live count
+"0x82206718" = { name = "ms_obj_pool_overflow" }          # pool-exhaustion / error path; longjmp via 0x82581A00
+"0x82206768" = { name = "ms_obj_tree_first" }             # return the first (lowest-depth) node in a sorted sibling list
+"0x822067c0" = { name = "ms_obj_tree_count" }             # count the nodes in a sorted sibling list
+# Global scene-graph / HUD draw-node singletons built over the same base class.
+"0x82206988" = { name = "ms_init_global_node" }           # construct one global draw node (embedded pose at node+0x5C), seed the default+current global-node ptr [0x82CF26DC]
+"0x82206ad0" = { name = "ms_build_global_node_tree" }     # construct the whole global draw-node tree (HUD/scene-graph singletons) and link them depth-sorted
+"0x82206a48" = { name = "ms_set_global_node_position" }   # set the current global node's pose X/Y as 16.16 (r3<<16 -> pose+0x18, r4<<16 -> pose+0x1c) and mark dirty ([0x82CF24DC] = -1)
+"0x82206a08" = { name = "ms_reset_current_global_node" }  # reset the current global draw-node ptr [0x82CF26DC] to the default (0x82BD3E58)
+"0x82206a20" = { name = "ms_get_current_global_node" }    # return the current global draw-node ptr [0x82CF26DC] (or the default 0x82BD3F20 when r3&1)
+
+# Sprite child / render-flag helpers (RE'd 2026-06-26). These feed the add_sprite
+# path by preparing the per-object render flags, anchor position, and child pose.
+"0x8221F920" = { name = "ms_obj_toggle_hflip" }                 # xor obj+0x24 bit0; consumed by add_sprite and by child relative-offset mirroring
+"0x8221F930" = { name = "ms_obj_toggle_vflip" }                 # xor obj+0x24 bit1; consumed by add_sprite and by child relative-offset mirroring
+"0x82236D28" = { name = "ms_obj_set_sprite_link_flag" }         # set obj+0x24 bit2 and clear obj+0x2A; ms_render_list_add_sprite passes both into insert_sprite
+"0x82236D40" = { name = "ms_obj_clear_sprite_link_flag" }       # clear obj+0x24 bit2 and set obj+0x2A=1; used by object reset and child/overlay setup paths
+"0x82220160" = { name = "ms_obj_get_render_anchor_xy" }         # write sprite anchor X/Y: null object gives camera center (+160,+120), otherwise pose+0x18/+0x1C plus optional mirrored cel bounds
+"0x82220328" = { name = "ms_obj_copy_sprite_render_flags" }     # copy draw halfwords and sprite flag bits from source object to child; also copies obj+0x2A mode byte
+"0x8221F6E0" = { name = "ms_obj_place_child_pose_relative" }    # set a child pose relative to a parent object with X/Y offsets, accounting for the global render origin, then ms_pose_commit
+"0x822207A8" = { name = "ms_obj_attach_sprite_child_relative" } # copy sprite flags to child, mirror offsets for h/v flip, place child relative to parent, and return the child
+
+# ---------------------------------------------------------------------------
+# POSE / TRANSFORM — 16.16 motion commit + NATIVE prev-position SNAPSHOT
+# (RE'd 2026-06-24, P3 in MSXX_60FPS_FUNCTION_TARGETS.md). ***Headline 60fps
+# find: the prev/current position pair the interpolator needs ALREADY EXISTS in
+# the pose struct — the game maintains it natively, per logic tick.***
+#
+# The "pose" is the draw sub-struct at obj+0x88 (the one ms_render_list_add_sprite
+# reads). Full field layout decoded from this family:
+#   +0x00  back-ptr to owner object
+#   +0x04  logical X  (s32, 16.16 fixed)   <- gameplay writes/integrates THIS
+#   +0x08  logical Y  (s32, 16.16 fixed)
+#   +0x0c  X velocity (s32, 16.16) added to +0x04 by the integrate variants
+#   +0x10  Y velocity (s32, 16.16) added to +0x08
+#   +0x14  parent/reference pose ptr (0 = world-space; else transform is relative)
+#   +0x18  COMMITTED X (s32, 16.16)   <- renderer's `lhz pose+0x18` = HIGH half = int X
+#   +0x1c  COMMITTED Y (s32, 16.16)   <- renderer's `lhz pose+0x1c` = HIGH half = int Y
+#   +0x20  PREV-tick committed X (s32, 16.16)  <<< interpolation "prev" >>>
+#   +0x24  PREV-tick committed Y (s32, 16.16)  <<< interpolation "prev" >>>
+#   +0x28  snapshot tick stamp (u8; == the toggle 0x82D74896 when +0x20/+0x24 last refreshed)
+#   +0x29  flip flags (bit0 hflip, bit1 vflip) — renderer reads this; SNAP, don't lerp
+#
+# ms_pose_commit (0x8223e600) is the core every setter/integrator tail-calls. It:
+#   (1) if +0x14!=0, folds the parent's committed pos (+parent flip) into the
+#       logical pos to get world-space committed pos (carry-corrected halfword add);
+#   (2) writes the new committed pos to +0x18/+0x1c and flip to +0x29;
+#   (3) SNAPSHOTS: on the FIRST commit (+0x28==0) prev:=current; afterwards, when
+#       the per-tick toggle [0x82D74896] differs from +0x28, it copies the OLD
+#       +0x18/+0x1c (read at entry, i.e. last tick's value) into +0x20/+0x24 and
+#       restamps +0x28. So between tick boundaries +0x20/+0x24 is frozen at the
+#       previous tick's position while +0x18/+0x1c holds the current tick's.
+#
+# 0x82D74896 (u8) is the SIM-TICK marker: ms_pose_tick_advance (0x8223e5b0)
+# alternates it 1<->2 (writes (old&1)+1) so consecutive ticks always differ. It is
+# called EXACTLY ONCE per common scene-update frame at 0x82250cd4 (right beside
+# ms_render_list_clear) => it toggles at the 30Hz producer/logic rate. (Also a
+# clean P6 phase-BOUNDARY signal, though not itself monotonic.)
+#
+# CONSEQUENCE FOR 60fps (supersedes the GAMEPLAY LOGIC TICK section's "manually
+# snapshot every live pose on ms_gameplay_tick entry/exit" plan): NO side-table and
+# NO object-identity/recycling handling (the P4 worry) is needed for POSITION. The
+# interpolator reads BOTH endpoints straight from the pose: prev = pose+0x20/+0x24,
+# current = pose+0x18/+0x1c, lerp the full 16.16 by the inter-tick phase, take the
+# high half, then add the caller's constant xoff/yoff (camera cancels — same offset
+# applies to both endpoints, so it stays a constant additive term). This is render-
+# lag interpolation (renders 1 tick behind), the standard correct form.
+#
+# VERIFICATION 2026-06-24 (instruction-level, closes 60fps Blockers 2b + 4):
+#   * FIELD WIDTH: +0x18/+0x1c AND +0x20/+0x24 are written with stw (32-bit 16.16) at
+#     0x8223e694/9c/ac/b0 -- NOT sth. Interpolator reads lwz; renderer's lhz +0x18 is
+#     the high (integer) halfword on BE. (Blocker 4 RESOLVED.)
+#   * SPAWN SEED: ms_pose_clear zeroes +0x28 (stb @0x8223e5f0), so the first commit
+#     after spawn takes the +0x28==0 seed path (0x8223e6a4) -> prev:=current -> no
+#     spawn-frame streak, no host guard needed. (Blocker 2b RESOLVED.)
+#   * OPEN (Blocker 2a, runtime): direct +0x18/1c writers bypass the snapshot
+#     (ms_pose_set_position 0x8223e7f0, ms_set_global_node_position 0x82206a48). If a
+#     MOVING entity uses them its prev goes stale -> streak. Confirm via the
+#     commit-coverage probe (diagnostic B); fall back to a host side-table prev only
+#     for any bypassers found.
+"0x8223e600" = { name = "ms_pose_commit" }                # pose r3: fold parent transform -> write committed 16.16 pos (stw, 32-bit) to pose+0x18/+0x1c & flip to pose+0x29, and snapshot PREV committed pos into pose+0x20/+0x24 once per tick (keyed on toggle 0x82D74896; first commit after a 0-cleared +0x28 seeds prev:=current). THE native prev/current generator for interpolation. (width + spawn-seed instruction-verified 2026-06-24.)
+"0x8223e5b0" = { name = "ms_pose_tick_advance" }          # advance the per-tick snapshot toggle 0x82D74896 (writes (old&1)+1, i.e. alternates 1<->2 so consecutive ticks differ); called once per common scene-update frame @0x82250cd4 = the 30Hz sim-tick boundary
+"0x8223e5c8" = { name = "ms_pose_clear" }                 # pose r3: zero every pose field (+0x04..+0x29 incl. logical/committed/prev/flip); leaves owner back-ptr untouched
+"0x8223e6f0" = { name = "ms_pose_integrate_commit" }      # pose r3: pose+0x04 += pose+0x0c (X vel), pose+0x08 += pose+0x10 (Y vel), then ms_pose_commit
+"0x8223e718" = { name = "ms_pose_compute_relative" }      # (pose r3, pose r4, inout_prevX r5, inout_prevY r6, inout_deltaX r7, inout_deltaY r8): adds pose r3's pos (minus pose r4's) to the four in/out words, then rewrites them as {[r5],[r6]} = PREV pos (pose+0x20/+0x24 relative) and {[r7],[r8]} = (current pose+0x18/+0x1c) - PREV = per-tick DELTA. So the game itself decomposes pose motion into prev + delta (the same pair an interpolator wants). No-op when r3==r4.
+"0x8223e7b0" = { name = "ms_pose_reset" }                 # obj r3: deref pose (obj+0x88), set pose+0 = owner back-ptr, zero all motion/committed/prev/flip fields
+"0x8223e7f0" = { name = "ms_pose_set_position" }          # (pose r3, parent r4, x r5, y r6): x/y given as INTEGERS (stored <<16 into +0x04/+0x08), clear flip, then commit
+"0x8223e818" = { name = "ms_pose_set_position_fixed" }    # (pose r3, parent r4, x r5, y r6): x/y given as raw 16.16 into +0x04/+0x08, clear flip, then commit
+"0x8223e838" = { name = "ms_pose_apply" }                 # obj r3: deref pose (obj+0x88) and ms_pose_commit it (no motion integration) — the per-frame commit the object handlers call before add_sprite
+"0x8223e840" = { name = "ms_pose_integrate_commit_obj" }  # obj r3: deref pose then ms_pose_integrate_commit (obj-arg variant of 0x8223e6f0)
+"0x8223e868" = { name = "ms_pose_set_position_obj" }      # (obj r3, parent r4, x r5, y r6): deref pose then ms_pose_set_position (obj-arg variant of 0x8223e7f0)
+
+# Per-type sprite/animation template bind (RE'd 2026-06-24, P3). Sets the obj's
+# sprite-table base that ms_render_list_add_sprite indexes for the frame entry.
+"0x822050e8" = { name = "ms_obj_set_type" }               # (obj r3, type r4): if obj+0x40 (current type) != r4, look up the per-type template (20-byte stride table ~0x82DA9560 keyed by type) and bind obj+0x38 (sprite-table base read by add_sprite), obj+0x34, obj+0x3c; bump the per-type live counter; store obj+0x40 = type. No-op + returns 255 if unchanged.
+
+# ---------------------------------------------------------------------------
+# ANIMATION — cel-index advance (RE'd 2026-06-24, P5 in
+# MSXX_60FPS_FUNCTION_TARGETS.md: "where the per-object sprite-frame index lives
+# and is advanced — confirm it is independent of pose+0x18/+0x1c, i.e. SNAP not
+# lerp"). ***P5 ANSWER: CONFIRMED INDEPENDENT.*** The cel/frame index reaches
+# ms_render_list_add_sprite as its r4 sprite-id arg (decoded P3): r4 indexes the
+# object's STATIC per-type frame table obj+0x38 ((id+4)*4 -> ms_bswap32 -> frame-
+# record ptr). r4 has NOTHING to do with the pose (obj+0x88) the renderer reads
+# for POSITION — the two are wholly separate inputs to add_sprite. Across all 26
+# add_sprite call sites, r4 is ALWAYS one of: a literal constant (static pose,
+# e.g. 139/141/144), a static-table lookup, or a value derived from a per-object
+# FRAME-TIME counter — NEVER from pose+0x18/+0x1c. => the cel index advances on
+# the 30Hz animation clock and must SNAP; only the pose position interpolates.
+#
+# TWO concrete cel-advance mechanisms were decoded as witnesses:
+#
+# (A) The SHARED animation-SCRIPT player (the game's main animated-object class,
+#     entity type 49; its tiny per-animation setter thunks at ~0x8222D8F0..DAxx
+#     each `b ms_anim_set_script` with a {framelist_len, framelist_ptr} pair). An
+#     "animation" is a list of FRAME RECORDS; the per-object animation state lives
+#     in the extended state struct at obj+0xC0:
+#       state+0x20  current animation FRAME-RECORD pointer
+#       state+0x2a  current frame's DURATION countdown (u8, ticks remaining)
+#       state+0x28  remaining lifetime (u16, frames) — frees the obj at 0
+#     Frame-record layout (read by ms_anim_apply_current_frame):
+#       +0x01  duration (ticks this cel is held)         +0x04/+0x06  X velocity delta
+#       +0x08/+0x0a  Y velocity delta                    +0x0d  cel-source mode
+#       +0x10  CEL descriptor (the sprite, or an index into a cel list when +0x0d!=0)
+#     Per tick ms_anim_tick decrements state+0x2a; on expiry it reloads the
+#     duration from the (advanced) frame's +0x01 and calls
+#     ms_anim_apply_current_frame, which folds the frame's velocity deltas into the
+#     pose (pose+0x0c/+0x10, flip-adjusted) and instantiates that frame's CEL as a
+#     child sprite node (ms_obj_spawn_sprite_child). So the cel is LATCHED at the
+#     frame-advance (30Hz logic), never per render — fully decoupled from position.
+"0x8222c980" = { name = "ms_anim_set_script" }            # (obj r3, framelist_len r4, framelist_ptr r5): bind the animated-object template (ms_obj_set_type type=49), store the animation framelist on the obj, seed pose velocity from the first frame. Funnel target of the ~40 per-animation `b 0x8222c980` setter thunks at ~0x8222D8F0+ (each passes a fixed {len, framelist}).
+"0x8222c2f0" = { name = "ms_anim_apply_current_frame" }   # obj r3: read the current animation frame record ([obj+0xC0]+0x20); fold the frame's X/Y velocity deltas (frame+0x04..0x0a, flip-adjusted) into pose+0x0c/+0x10; then INSTANTIATE the frame's cel as a child sprite node (cel = frame+0x10, or an indexed cel-list lookup when frame+0x0d!=0) via ms_obj_spawn_sprite_child. This is where the cel index is selected — on the animation clock, not from position.
+"0x8222cbb8" = { name = "ms_anim_tick" }                  # obj r3: per-tick animation update (a node+0x08 state handler for type 49). Decrement the current frame's duration countdown ([obj+0xC0]+0x2a); on expiry reload it from the frame's +0x01 and call ms_anim_apply_current_frame (advance cel). Also decrement the lifetime counter ([obj+0xC0]+0x28) and free the object via ms_obj_pool_overflow at 0.
+"0x82206550" = { name = "ms_obj_spawn_sprite_child" }     # (parent?, child_node r4, ...): link a child sprite/cel node into the parent's depth-sorted tree (wrapper over ms_obj_tree_insert_child, copies field +0xb4). Used by ms_anim_apply_current_frame to instantiate a frame's cel.
+# (B) A SECOND, simpler witness — an animated entity whose cel is a direct
+#     function of a per-object frame TIMER (not a script): cel = celSeqTable[
+#     frame_timer / duration ], frame_timer at [obj+0xC0]+0x08 (a per-tick u8
+#     counter, range-checked 0..20), duration = 10, celSeqTable = the static u16
+#     table at 0x8201A5B0. Same conclusion: the cel is a function of TIME, never
+#     of pose+0x18/+0x1c.
+"0x8224bd40" = { name = "ms_obj_handler_8224bd40" }       # animated entity (combined update+draw node+0x08 handler): emits its cel via add_sprite with r4 = celSeqTable[0x8201A5B0][ frame_timer/10 ], frame_timer = [obj+0xC0]+0x08. A clean P5 witness that the cel index is driven by a per-object frame timer, independent of pose position.
+
+# ---------------------------------------------------------------------------
+# OBJECT-TREE DRAW/UPDATE WALK — the per-object dispatch (RE'd 2026-06-24, P2 in
+# MSXX_60FPS_FUNCTION_TARGETS.md: "the loop that actually drives the per-entity
+# add_sprite producers").
+#
+# This is the "bctrl-over-the-tree" the P2 target sought, but it is NOT a classic
+# for-loop: it is a CURSOR-DRIVEN, CONTINUATION-CHAINED dispatch.
+#
+#   * Each object node carries its HANDLER as a direct function pointer at
+#     node+0x08 (the SAME field ms_obj_is_tree_sentinel tests; the list-end
+#     sentinel's handler is 0x822060D8, a terminator). A freshly-allocated node
+#     defaults to the no-op handler ms_obj_handler_null (0x82206980); the
+#     per-entity-TYPE handler is installed at node+0x08 by that type's spawn fn
+#     (representative pair below: ms_obj_spawn_822090c8 installs handler
+#     ms_obj_handler_822090c8). Type handlers are also tabulated in the
+#     entity-type handler table in data (e.g. slot 0x82BD6EA8 = 0x82209570).
+#
+#   * ms_obj_draw_dispatch_step (0x822068F8) is ONE step of the walk: it reads
+#     the global draw cursor [0x82DCCB08] (current node), sets up the render
+#     anchor (0x82200140/0x82200020/0x82200040), calls the node's handler
+#     (node+0x08) via bctrl, then advances the cursor to node+0x14 (next
+#     sibling). A guard (0x82581D20 on 0x82CF1DA0) can skip the dispatch and
+#     advance-only. Object handlers tail-call BACK into 0x822068F8 (e.g. the
+#     scene-object handler at 0x8224FAF0 ends in `bl 0x822068F8; blr`), so a
+#     single kickoff chains through the whole depth-sorted sibling list.
+#
+#   ADDRESS-CORRECTION NOTE: the object-pool/walk bookkeeping block is at base
+#   0x82DCCB00 — count @0x82DCCB04, draw cursor @0x82DCCB08, free-pool head
+#   @0x82DCCB0C, in-callback flag @0x82DCCB10 (all via `lis -32035`=0x82DD0000
+#   then a negative disp, e.g. -13556 -> 0x82DCCB0C). Earlier comments in this
+#   file that cite "0x82DDCB04/08/0C/10" for the pool head / live count are OFF
+#   BY +0x1000; the true addresses are 0x82DCCB04/08/0C/10. Use these when
+#   hooking the cursor for interpolation.
+#
+# CONSEQUENCE FOR 60fps (the P2 deliverable — "is DRAW separable from UPDATE?"):
+# NO. Each entity's node+0x08 handler is a COMBINED update+draw method (it both
+# advances the object's state AND emits its sprite via ms_render_list_add_sprite)
+# and the cursor dispatches it exactly ONCE per walk. There is no draw-only
+# re-entry point per object. So the off-frame re-pass cannot simply "re-run the
+# draw walk" (that would re-run the sim). The viable off-frame seams remain (a)
+# lerp at the EMIT/flush side ms_render_emit_sprite_quad (P4) over the already-
+# built list, or (b) lerp pose inside ms_render_list_add_sprite AND have the
+# producers re-fire -- which requires re-running these combined handlers, i.e.
+# it is NOT free. This refines P1's "force a draw-only re-pass" note: the scene
+# render path (ms_scene_render) only RE-FLUSHES the pre-built list; it does not
+# re-invoke these producer handlers.
+"0x822068f8" = { name = "ms_obj_draw_dispatch_step" }     # one step of the object draw/update walk: set render anchor (0x82200140/20/40), call current cursor node's handler (node+0x08) via bctrl, advance cursor [0x82DCCB08] to node+0x14. Handlers tail-chain back here, so one kickoff draws the whole sibling list. Guarded by 0x82581D20 on 0x82CF1DA0 (advance-only when it fails).
+"0x82206980" = { name = "ms_obj_handler_null" }           # default no-op object handler (lone blr); node+0x08 default for a fresh node until its type's spawn installs the real handler
+"0x82209570" = { name = "ms_obj_spawn_822090c8" }         # spawn for the debug object viewer below: installs handler 0x822090c8 at node+0x08 (0x82209678: stw of 0x822090c8), registers the object in the spatial grid (0x82238400), then runs the handler once. Reached via the entity-type handler table @0x82BD6EA8.
+# CORRECTION (P3, 2026-06-24): 0x822090c8 is NOT a typical gameplay entity — it is
+# the DEBUG OBJECT/ANIMATION VIEWER. Decoded field-by-field: it drives an "edit
+# record" at [obj+0xC0] from d-pad/button globals (0x82D7BA10/BA30/BA50, per-bit),
+# cycles a type index in [0,198] and feeds it to ms_obj_set_type (so it previews
+# EVERY entity type), nudges per-object draw offsets, toggles flip flags, and
+# sprintf's a status line. It is still a real add_sprite PRODUCER, so it is a clean
+# isolated specimen for P3 — but the universal interpolate/snap RULE comes from
+# ms_render_list_add_sprite (0x82236BB8) itself, which is type-agnostic, not from
+# this one handler. (P2's "representative producer" framing was thus imprecise.)
+"0x822090c8" = { name = "ms_obj_handler_822090c8" }       # debug object/animation viewer handler (a COMBINED update+draw producer): edits an [obj+0xC0] record from input globals, picks the entity type to preview (ms_obj_set_type), commits the pose (ms_pose_apply 0x8223e838), then emits the sprite via ms_render_list_add_sprite at 0x82209484 (r4 = preview frame index, r5/r6 = draw offset + camera). One of the producers ms_obj_draw_dispatch_step bctrl's per node.
+
+# ---------------------------------------------------------------------------
+# Spatial / collision HASH-GRID manager (RE'd 2026-06-23). NOTE: clarifies the
+# earlier "object free-list" mention in the interpolation notes — that free-list
+# is the GRID-CELL-NODE pool at worldmgr+0xC00 (3072), NOT the object pool (the
+# object pool is [0x82DDCB0C], above). The grid is an array of 32 cell records
+# (64 bytes each: four list-heads at +0x08/+0x18/+0x28/+0x38, {next@0, prev@4,
+# rec@8, ...}) embedded at the start of the worldmgr; an object references up to
+# 4 cells via a slot array at obj+0x2c (occupancy count at obj+0x29, max 4). The
+# worldmgr singleton is the deref of [0x82D7B120]; the cell-node free list head
+# is at worldmgr+0xC00. ms_world_advance_scroll (0x82238628) drives the rebuild.
+"0x822381f8" = { name = "ms_grid_release_cell_node" }     # unlink one cell node from its cell list and push it onto the worldmgr+0xC00 free list (marks node fields 2/4 = 0xffff, 7 = 2)
+"0x82238258" = { name = "ms_grid_reset_all_cells" }       # iterate the grid's 32 cell records (stride 64, four list-heads each) releasing every populated node back to the worldmgr+0xC00 free list
+"0x82238400" = { name = "ms_grid_register_object_cell" }  # allocate a cell node from the worldmgr+0xC00 free list and link an object into the grid cell for a given coordinate; records the cell in the object's obj+0x2c slot array (count obj+0x29, capped at 4); logs on pool exhaustion
+"0x822385b8" = { name = "ms_grid_unregister_object" }     # remove an object from every grid cell it occupies (walks the obj+0x2c slot array, count obj+0x29)
+"0x822383f0" = { name = "ms_grid_clear_object_slots" }    # zero an object's cell-node slot count (obj+0x29 = 0); called by ms_obj_init
+
+# ---------------------------------------------------------------------------
+# GAMEPLAY LOGIC TICK — the sim-step seam (RE'd 2026-06-24, on the 60fps path).
+#
+# This is the per-step gameplay update: the function the sim advances each logic
+# tick, which moves entities and so is the CAPTURE side of the planned 30Hz-sim ->
+# 60fps render-time interpolation. (The render side / lerp point is
+# ms_render_list_add_sprite 0x82236BB8; this is where the prev/current pose
+# snapshot it lerps would be taken.)
+#
+# ms_gameplay_tick (0x822491f8) is called by the stage-state handlers around
+# 0x8224a/b/cxxx (named in the function-size map below) and runs a fixed SEQUENCE of subsystem
+# updates, ending in ms_camera_compute_view_floats (0x821F4FE0, already named) so
+# the view is rebuilt after the world has advanced one step. Its mirror is
+# ms_gameplay_init (0x82248920, called by the three entry/reset states
+# 0x8224A0B8/0x8224A4C8/0x8224AF28), which RESETS the same subsystems
+# (each *_init below pairs 1:1 with a *_tick) and seeds the playfield
+# CENTER 160,120 (= 320/2, 240/2) into the stage controller at 0x82D39B74
+# (+0x08 = 160, +0x10 = 120) plus both player records via ms_player_record_init.
+# The init/tick pairing is proven field-level for the slot table: ms_gameplay_init
+# clears the 256-entry table at 0x82D7C140 (ms_tick_object_slot_table walks it).
+#
+# => For interpolation: snapshot every live object's pose {+0x18,+0x1c} on entry
+# to ms_gameplay_tick (prev) and on exit (current); ms_render_list_add_sprite then
+# lerps by the inter-tick phase. The subsystem list below says WHICH systems move
+# entities, so the snapshot can bracket exactly the step that mutates pose.
+#   *** SUPERSEDED by P3 (2026-06-24): no manual snapshot is needed. ms_pose_commit
+#   (0x8223e600) ALREADY maintains the prev pos at pose+0x20/+0x24 (current at
+#   +0x18/+0x1c), refreshed once per tick via the 0x82D74896 toggle. Read both
+#   straight from the pose; see the POSE / TRANSFORM section above. This seam
+#   (capture in ms_gameplay_tick) is now only a fallback. ***
+"0x822491f8" = { name = "ms_gameplay_tick" }   # advance gameplay one logic step: sets player-active bits (sentinel-tests the two player objects 0x82BD3E58/0x82BD3F20 via ms_obj_is_tree_sentinel), runs the subsystem-update sequence below in order, then ms_camera_compute_view_floats. Called by the 0x8224bxxx stage state handlers. THE sim tick / interpolation capture seam.
+"0x82248920" = { name = "ms_gameplay_init" }   # reset all gameplay subsystems (the *_init mirrors of the tick's subsystems); inits both player records (ms_player_record_init 0/1) and seeds the playfield center 160,120 into the stage controller at 0x82D39B74
+
+# --- subsystem initializers, in the order ms_gameplay_init calls them ---
+# These are the screen/gameplay-entry reset side of the tick functions below. They
+# are useful 60fps anchors because entering a new room/screen should snap any
+# interpolation state, not blend across the reset.
+"0x8228b9d8" = { name = "ms_init_player_objects_for_gameplay" }   # reset both player root objects (0x82BD3E58/0x82BD3F20) via ms_player_root_reset, then clear their tracked-object links via 0x82236D40
+"0x82205338" = { name = "ms_sound_reset_event_slots" }            # clear the 15 sound-event slots at 0x82DDCC60 (slot bytes +0x0c/+0x0d, timer +0x0e, id=-1), then reset the packed sound-event dispatcher through 0x821F4688(0)
+"0x82211e38" = { name = "ms_init_object_slot_table" }             # clear the 256-entry object slot table at 0x82D7C140 plus its side tables/flags; ms_tick_object_slot_table walks this each gameplay tick
+"0x82233e98" = { name = "ms_init_obj_screenpos_buffers" }         # reset the two small screen-position buffers at 0x82D8B4C0/0x82D8B140 (six 0x90-byte-spaced entries each) before ms_tick_compute_obj_screenpos starts filling them
+"0x8229a3f0" = { name = "ms_init_loop_sound_99" }                 # reset continuous sound-event 99 state (0x82D39CF0 block + edge byte 0x82D73F2F) before ms_tick_loop_sound_99 edge-drives ARC_SE arcse041
+"0x8229f378" = { name = "ms_init_loop_sound_114" }                # reset continuous sound-event 114 state (0x82D39D30 block + edge byte 0x82D73F2E) before ms_tick_loop_sound_114 edge-drives event 114
+"0x82219e18" = { name = "ms_init_oddframe_gate" }                 # zero the two alternating-frame gate counters at 0x82D7B9A0+0x60 / 0x82D7B920+0x60; ms_tick_oddframe_gate clears one side based on vblank parity
+"0x82234de0" = { name = "ms_init_effect_table" }                  # reset the 32-slot timed effect table at 0x82CF66F8 (slot state, timer, and embedded pose via ms_pose_clear) before ms_tick_effect_table updates live effects
+
+# Player position records (g_player_pos_record 0x82D73F20/3F28; read everywhere via
+# ms_get_player_pos_record 0x822A5390). These set/clear them.
+"0x822a4ed8" = { name = "ms_player_record_init" }    # (index r3) thin wrapper: r4 = player object base, then ms_player_record_reset
+"0x822a4ee0" = { name = "ms_player_record_reset" }   # (player_obj r4, index r5) zero the embedded sub-record at obj+0x3F10 and the global g_player_pos_record[index] (0x82D73F20 / 0x82D73F28)
+
+# Player root activation and shared state tail (RE'd 2026-06-26). This is the path
+# that wires a live player object into the torso/legs sprite registration above.
+"0x8228B710" = { name = "ms_player_root_reset" }              # reset one player root object: install the first-frame activation handler (0x8228B5A8), clear player timers/flags, and reset the player's loop-sound state.
+"0x82289B40" = { name = "ms_player_root_enter_active_state" } # one-shot transition from the activation handler into a live player state: clears player state, selects the two body sprite types via ms_player_select_body_sprite_type, registers torso/legs cells via ms_player_register_body_sprite_cells, then chooses the state handler.
+"0x8228A900" = { name = "ms_player_state_common_update_tail" } # shared tail used by many player state handlers; runs timers/flags, invokes the per-state subhandler stored at player_state+0x10, then does common player collision/bookkeeping.
+
+# --- subsystem updaters, in the order ms_gameplay_tick calls them ---
+# (Each *_tick has an *_init counterpart invoked by ms_gameplay_init.)
+"0x82247c88" = { name = "ms_tick_camera_region" }          # camera/scroll region state machine (states 0/1/2): gated on the ptr at 0x82D74668, compares the scroll position against the 0x82D7466C/0x82D746A0 limits (camera-globals range that ms_camera_reset zeroes). [role: camera/scroll, mechanism confirmed]
+"0x822a5940" = { name = "ms_tick_player_object_callbacks" } # walk the callback list at 0x82D39D54, sentinel-test player obj 0x82BD3E58, and bctrl each entry using the player position (g_player_pos_record 0x82D73F20). [player vs object pass; purpose tentative — collision/interaction]
+"0x82211ee8" = { name = "ms_tick_object_slot_table" }      # walk the 256-entry, 8-byte slot table at 0x82D7C140; for live {ptr,ptr} slots validate obj+0xB8 (low 13 bits == slot index) and call 0x82211720. Cleared by its init 0x82211e38.
+"0x82233ef8" = { name = "ms_tick_compute_obj_screenpos" }  # fetch a target object (0x8221FA88) and compute its screen X/Y from the pose at obj+0x88 (with hflip handling); writes 0x8000 to 0x82D7B4B0. [mechanism = world->screen of one object; purpose tentative]
+"0x82219e40" = { name = "ms_tick_oddframe_gate" }          # read the sw vblank counter parity (0x82D74A76 bit0) and clear a u16 at 0x82D7B9A0+0x60 / 0x82D7B920+0x60 accordingly (alternating-frame gate). [leaf]
+"0x82235098" = { name = "ms_tick_effect_table" }           # reset two 24-word arrays in the 0x82CF66F8 block then update up to 32 slots, decrementing each slot timer and calling 0x8223E600 on the live ones. [32-slot timed effect/particle table]
+"0x82237618" = { name = "ms_tick_flag_gated_obj_lookup" }  # flag-gated (0x82D27651): read tracked object A (0x82D8B124) +0xA, project it via ms_render_project_record_xy (0x82236E48), then ms_obj_tree_find (0x82206550). [mechanism = conditional object find; purpose tentative]
+"0x82299e20" = { name = "ms_tick_loop_sound_99" }          # per-tick edge driver for continuous sound event 99 (= ARC_SE arcse041, the laser): enable flag 0x82D39CF0, edge byte 0x82D73F2F; rising edge -> ms_sound_enqueue_event(99), falling -> ms_sound_stop_event(99)
+"0x8229f1c0" = { name = "ms_tick_loop_sound_114" }         # per-tick edge driver for continuous sound event 114: enable flag 0x82D39D40, edge byte 0x82D73F2E; rising -> ms_sound_enqueue_event(114), falling -> ms_sound_stop_event(114)
+
+# Conditional tail step of ms_gameplay_tick (RE'd 2026-06-24). Runs only when bit
+# 0x20 of [0x82D8CA68+0x04] is set; the bit is cleared afterward, so it is a
+# deferred / edge-triggered one-shot. For each live player object
+# (0x82BD3E58/0x82BD3F20, sentinel-checked) it ORs bit 0x02 into the player
+# sub-object (player+0xC0)+0x3B and writes state code 6 to player+0xAA -- i.e. it
+# forces both players into a state. [mechanism confirmed; exact state purpose tentative]
+"0x822782a0" = { name = "ms_tick_pending_player_event" }
 
 # ---------------------------------------------------------------------------
 # Phase D, pass 1: resolve compile errors of the form
@@ -272,8 +1167,17 @@ SwitchToFiber        = 0x8242D230
 0x8221A360 = { size = 0x38 }
 0x8221B128 = { size = 0x60 }
 0x8221DB90 = { size = 0x3C }
-0x822212E0 = { size = 0x4C }
-0x822215C8 = { size = 0x64 }
+0x822210C8 = { size = 0x90, name = "ms_idle_move_prompt_right_show_and_play_se001" } # Build prompt sprites from object data, then enqueue event 47 (SE se001) when any prompt asset id is present.
+0x82221158 = { size = 0xE0, name = "ms_idle_move_prompt_right_update_anchor" } # Update the right-side prompt anchor state at 0x82CF6664 from the owning object/camera position.
+0x82221238 = { size = 0xA8, name = "ms_idle_move_prompt_right_show_from_anchor" } # Copy 0x82CF6664 into object data, prime the prompt cel, then show/play se001.
+0x822212E0 = { size = 0x4C, name = "ms_idle_move_prompt_right_wait_to_show" }
+0x82221330 = { size = 0x58, name = "ms_idle_move_prompt_right_arm_wait" }
+0x82221388 = { size = 0xB8, name = "ms_idle_move_prompt_right_idle_delay_tick" } # Counts down 0x82CF6670, resetting to 150 frames while the movement check still trips.
+0x82221440 = { size = 0x20, name = "ms_idle_move_prompt_right_begin_idle_delay" }
+0x82221460 = { size = 0xE0, name = "ms_idle_move_prompt_right_display_tick" } # Position/update the visible prompt, then return to the idle-delay state.
+0x82221540 = { size = 0x88, name = "ms_idle_move_prompt_right_gate_tick" }
+0x822215C8 = { size = 0x64, name = "ms_idle_move_prompt_right_init" }
+0x82221630 = { size = 0x60, name = "ms_init_idle_move_prompt_right" } # Seed 0x82CF6664 at x=264,y=160 with a 150-frame idle delay and spawn the prompt child object.
 0x82221690 = { size = 0x5C }
 0x82221788 = { size = 0xA4 }
 0x82221A48 = { size = 0x64 }
@@ -326,11 +1230,19 @@ SwitchToFiber        = 0x8242D230
 0x82226960 = { size = 0x54 }
 0x82226A28 = { size = 0x220 }
 0x82226C48 = { size = 0x84 }
-0x82226ED8 = { size = 0x68 }
-0x82227100 = { size = 0x4C }
-0x822273D8 = { size = 0x64 }
-0x8222AC18 = { size = 0x11C }
-0x8222AF08 = { size = 0x120 }
+0x82226E90 = { size = 0x48, name = "ms_init_idle_move_prompt_left_state" } # Seed 0x82CF6680 at x=64,y=160 for the left-side idle prompt.
+0x82226ED8 = { size = 0x68, name = "ms_idle_move_prompt_left_show_and_play_se001" } # Build left-side prompt sprites and enqueue event 47 (SE se001).
+0x82226F40 = { size = 0xE0, name = "ms_idle_move_prompt_left_update_anchor" } # Update the left-side prompt anchor state at 0x82CF6680 from the owning object/camera position.
+0x82227020 = { size = 0xE0, name = "ms_idle_move_prompt_left_show_from_anchor_and_play_se001" } # Copy 0x82CF6680 into object data, prime both prompt cels, then enqueue event 47.
+0x82227100 = { size = 0x4C, name = "ms_idle_move_prompt_left_wait_to_show" }
+0x82227150 = { size = 0x58, name = "ms_idle_move_prompt_left_arm_wait" }
+0x822271A8 = { size = 0xC0, name = "ms_idle_move_prompt_left_idle_delay_tick" } # Counts down 0x82CF668C before the left prompt can be shown again.
+0x82227268 = { size = 0x20, name = "ms_idle_move_prompt_left_begin_idle_delay" }
+0x82227288 = { size = 0xC8, name = "ms_idle_move_prompt_left_display_tick" } # Position/update the visible prompt from 0x82CF6690/6694, then return to the idle-delay state.
+0x82227350 = { size = 0x88, name = "ms_idle_move_prompt_left_gate_tick" }
+0x822273D8 = { size = 0x64, name = "ms_idle_move_prompt_left_init" }
+0x8222AC18 = { size = 0x11C, name = "ms_hud_weapon_panel_init" } # construct the bottom weapon-panel HUD object: set type 43, place the lane near y=200, clear 6/7 slot bytes to 0xFF based on player/availability, then enter ms_hud_weapon_panel_wait_for_player_ready.
+0x8222AF08 = { size = 0x120, name = "ms_hud_weapon_panel_selection_event" } # consume the panel's pending selection/change flag at obj+0xAE, mirror the global selected slot/count into per-player HUD state, optionally trigger feedback, then resume the weapon-panel start/update path.
 0x8222BB50 = { size = 0x278 }
 0x8222BF78 = { size = 0x44 }
 0x8222BFC0 = { size = 0x6C }
@@ -383,16 +1295,47 @@ SwitchToFiber        = 0x8242D230
 0x82241598 = { size = 0x5C }
 0x822415F8 = { size = 0xB4 }
 0x822418A0 = { size = 0x140 }
-0x8224A1C8 = { size = 0x58 }
-0x8224A5E0 = { size = 0x614 }
-0x8224AEC0 = { size = 0x64 }
-0x8224AF28 = { size = 0x150 }
-0x8224B458 = { size = 0x34 }
-0x8224B490 = { size = 0x68 }
-0x8224B4F8 = { size = 0x58 }
-0x8224C328 = { size = 0x15C }
-0x8224C5D8 = { size = 0x24 }
-0x8224C600 = { size = 0x14 }
+# Stage gameplay state-machine cluster (RE'd 2026-06-25 for 60fps snap/tick anchors).
+# Entry/reset states call ms_gameplay_init; steady/timed states call ms_gameplay_tick
+# while waiting for timers, transition flags, or screen-advance objects to finish.
+0x8224A0B8 = { size = 0x60, name = "ms_stage_state_reset_and_init_gameplay" }      # reset sound/player-side state, clear both player setup slots, then ms_gameplay_init
+0x8224A118 = { size = 0xAC, name = "ms_stage_state_start_entry_scripts" }          # select per-stage script ids and start one/two entry scripts through 0x82248B50
+0x8224A1C8 = { size = 0x58, name = "ms_stage_state_clear_entry_flags" }            # clear transition bytes in the stage object and advance through 0x82248D10
+0x8224A220 = { size = 0x2A8, name = "ms_stage_state_enter_gameplay_tick" }         # entry countdown/setup; stores next state pointer, then calls ms_gameplay_tick
+0x8224A4C8 = { size = 0x118, name = "ms_stage_state_reset_scene_and_init_gameplay" } # clears stage globals, resets tracked-object/camera state, then ms_gameplay_init
+0x8224A5E0 = { size = 0x614, name = "ms_stage_state_entry_sequence" }              # byte +0x0d driven entry sequence; eventually tail-calls ms_stage_state_enter_gameplay_tick
+0x8224ABF8 = { size = 0x2C8, name = "ms_stage_state_screen_advance_sequence" }     # timed screen/room advance; ticks gameplay while timer is live, then updates scroll/status globals
+0x8224AEC0 = { size = 0x64, name = "ms_stage_state_wait_transition_ready" }        # poll transition readiness (0x823EB1F0) and dispatch/advance the stage object when ready
+0x8224AF28 = { size = 0x150, name = "ms_stage_state_begin_gameplay" }              # gameplay entry path: starts entry scripts when needed, calls ms_gameplay_init, then enters the stage loop
+0x8224B078 = { size = 0xA8, name = "ms_stage_state_tick_until_screen_advance" }    # decrement stage timer; ms_gameplay_tick until zero, then begin screen-advance sequence
+0x8224B120 = { size = 0x74, name = "ms_stage_state_arm_transition_wait" }          # set stage object flag/next handler, optionally reset sound slots, then wait for transition readiness
+0x8224B198 = { size = 0x138, name = "ms_stage_state_prepare_gameplay_restart" }    # transition/restart dispatcher; selects restart path and points object+0x08 back to begin-gameplay
+0x8224B2D0 = { size = 0x100, name = "ms_stage_state_begin_screen_advance" }        # spawn/setup the screen-advance helper, then chain into tick-until-screen-advance
+0x8224B3D0 = { size = 0x84, name = "ms_stage_state_tick_until_transition_wait" }   # countdown + ms_gameplay_tick; when expired, arm the transition-wait state
+0x8224B458 = { size = 0x34, name = "ms_stage_state_restart_after_fx_reset" }       # reset transition FX and prepare gameplay restart
+0x8224B490 = { size = 0x68, name = "ms_stage_state_tick_then_restart_after_fx" }   # countdown + ms_gameplay_tick; on expiry reset FX and prepare restart
+0x8224B4F8 = { size = 0x58, name = "ms_stage_state_tick_or_prepare_restart" }      # if object flag is set, arm restart; always advances one ms_gameplay_tick
+0x8224B550 = { size = 0x64, name = "ms_stage_state_tick_or_begin_screen_advance" } # tick while inactive; when flagged, switch to screen-advance setup
+0x8224B5B8 = { size = 0x90, name = "ms_stage_state_tick_until_fadeout" }           # countdown + ms_gameplay_tick; on expiry runs fade/object cleanup and chains to transition-wait countdown
+0x8224B648 = { size = 0x48, name = "ms_stage_state_set_fadeout_restart" }          # program fade params and point object+0x08 at restart_after_fx_reset
+0x8224B690 = { size = 0x94, name = "ms_stage_state_begin_short_transition_tick" }  # set a short timer/fade, then tick until restart path is ready
+0x8224B728 = { size = 0x18, name = "ms_stage_state_continue_gameplay_tick" }       # tiny state switch to tick_or_prepare_restart, tail-calls ms_gameplay_tick
+0x8224B740 = { size = 0xEC, name = "ms_stage_state_tick_until_branch_transition" } # countdown + ms_gameplay_tick; on expiry chooses screen advance or helper-spawn branch
+0x8224B830 = { size = 0x94, name = "ms_stage_state_begin_fadeout_countdown" }      # initialize fade/countdown length, then chain into tick_until_fadeout
+0x8224B8C8 = { size = 0xA0, name = "ms_stage_state_spawn_path_a_tick" }            # spawn helper path A or continue ticking gameplay until the helper can be created
+0x8224B968 = { size = 0xA0, name = "ms_stage_state_spawn_path_b_tick" }            # spawn helper path B or continue ticking gameplay until the helper can be created
+0x8224BA08 = { size = 0xBC, name = "ms_stage_state_spawn_path_c_tick" }            # spawn helper path C/copy saved stage coords, then continue ms_gameplay_tick
+0x8224BAC8 = { size = 0x148, name = "ms_stage_state_prepare_exit_sequence" }       # reset draw/sound/transition flags, program exit countdown, then chain to branch-transition tick
+0x8224BC10 = { size = 0x130, name = "ms_stage_state_run_gameplay" }                # main gameplay loop monitor: handles transition triggers, sound changes, then calls ms_gameplay_tick
+0x8224C288 = { size = 0x9C, name = "ms_stage_state_init_overlay_object" }          # initialize the overlay/animated helper object, then call the 0x8224BD40 object handler
+0x8224C328 = { size = 0x15C, name = "ms_stage_state_tick_until_overlay_ready" }    # update overlay object/camera bounds; ms_gameplay_tick until timer/helper status clears, then init overlay
+0x8224C488 = { size = 0x108, name = "ms_stage_state_restart_with_scene_flags" }    # set scene/stage flags for special restart cases, then re-initialize the overlay object
+0x8224C5D8 = { size = 0x24, name = "ms_stage_state_tick_until_restart" }           # tiny countdown: tail-calls ms_gameplay_tick until expiry, then restarts with scene flags
+0x8224C600 = { size = 0x14, name = "ms_stage_state_tick_or_restart_on_flag" }      # tail-call ms_gameplay_tick until object flag is set, then restart with scene flags
+0x8224C618 = { size = 0x88, name = "ms_stage_state_timed_restart_tick" }           # program transition params and tick until the countdown expires, then restart with scene flags
+0x8224C6A0 = { size = 0x20, name = "ms_stage_state_begin_32f_restart_timer" }      # set a 32-frame timer and tail-call timed_restart_tick
+0x8224C6C0 = { size = 0x60, name = "ms_stage_state_begin_flagged_restart" }        # clear flag/fade state and point object+0x08 at tick_or_restart_on_flag
+0x8224C720 = { size = 0x20, name = "ms_stage_state_begin_20f_restart_timer" }      # set a 20-frame timer and tail-call timed_restart_tick
 0x8224CCF8 = { size = 0x58 }
 0x8224CD50 = { size = 0xB0 }
 0x8224D100 = { size = 0xE4 }
@@ -405,7 +1348,7 @@ SwitchToFiber        = 0x8242D230
 0x8224F330 = { size = 0x424 }
 0x8224F908 = { size = 0x6C }
 0x822502F8 = { size = 0x98 }
-0x82250D20 = { size = 0xB4 }
+0x82250D20 = { size = 0xB4, name = "ms_scene_state_run" }  # scene-descriptor-table run fn (see the frame-driver section): refreshes the scene-state object + global HUD/root state, then calls ms_scene_update. Re-dispatched through table entry 0x8200750c for the steady per-frame path; ms_scene_update commonly returns after one rendered frame.
 0x822511A0 = { size = 0x5C }
 0x82251208 = { size = 0x44 }
 0x82251678 = { size = 0x94 }
@@ -634,8 +1577,8 @@ SwitchToFiber        = 0x8242D230
 0x82279A18 = { size = 0x40 }
 0x82279AF8 = { size = 0xBC }
 0x82279BB8 = { size = 0x7C }
-0x8227A1E8 = { size = 0xA4 }
-0x8227A290 = { size = 0xA0 }
+0x8227A1E8 = { size = 0xA4, name = "ms_player_rebind_body_cells_sound388" } # player state transition: enqueue sound event 388, spawn/lookup a child node, re-register current per-character body cells, set body flags/timers, then continue via 0x8228B838.
+0x8227A290 = { size = 0xA0, name = "ms_player_select_body_type0_rebind_cells" } # sibling state transition: select body sprite type 0, spawn/lookup a child node, re-register current per-character body cells, set the same body flags/timers, then continue via 0x8228B838.
 0x8227AE40 = { size = 0xC }
 0x8227AE50 = { size = 0xC }
 0x8227B140 = { size = 0x60 }
@@ -665,8 +1608,8 @@ SwitchToFiber        = 0x8242D230
 0x82288260 = { size = 0x2C }
 0x82288290 = { size = 0x54 }
 0x82289730 = { size = 0x68 }
-0x8228B290 = { size = 0x48 }
-0x8228B5A8 = { size = 0x80 }
+0x8228B290 = { size = 0x48, name = "ms_player_root_wait_active_handler" }
+0x8228B5A8 = { size = 0x80, name = "ms_player_root_first_frame_handler" }
 0x8228BE78 = { size = 0x194 }
 0x8228C860 = { size = 0x1C4 }
 0x8228DED0 = { size = 0xC }
@@ -1732,7 +2675,7 @@ SwitchToFiber        = 0x8242D230
 0x82325960 = { size = 0x68 }
 0x82325A18 = { size = 0x48 }
 0x82325CE0 = { size = 0x170 }
-0x82325E50 = { size = 0x4C }
+0x82325E50 = { size = 0x4C, name = "ms_obj_emit_static_sprite144_82325e50" } # tiny handler: setup via 0x8221DD48, submit sprite id 144 at origin through add_sprite, then switch node+0x08 to 0x82325CE0.
 0x82325FE8 = { size = 0x1C }
 0x82326008 = { size = 0x4 }
 0x823265F8 = { size = 0xC8 }
@@ -1854,7 +2797,7 @@ SwitchToFiber        = 0x8242D230
 0x823373C8 = { size = 0x9C }
 0x82337550 = { size = 0x6C }
 0x823376C8 = { size = 0x60 }
-0x82337848 = { size = 0x4C }
+0x82337848 = { size = 0x4C, name = "ms_obj_emit_static_sprite144_82337848" } # twin tiny handler: setup via 0x8221DD48, submit sprite id 144 at origin through add_sprite, then switch node+0x08 to 0x8233A080.
 0x823380D8 = { size = 0x48 }
 0x82338120 = { size = 0x90 }
 0x82338758 = { size = 0x64 }
@@ -4359,7 +5302,79 @@ labels = [0x822CC498, 0x822CC4C0, 0x822CC8D8, 0x822CC4F8, 0x822CC560]
 # ---------------------------------------------------------------------------
 # Mid-ASM hooks
 # ---------------------------------------------------------------------------
+
+# [Game] Integer playfield scale (only when [Graphics] GameUpscaleFilter = Point).
 #
+# ms_present_playfield_upscale (0x823E7310) computes four FP registers before it
+# emits the final playfield quad:
+#   f31 = left, f30 = top, f28 = right, f27 = bottom
+#
+# Stock:  (208, 36) -> (1072, 684), i.e. 864x648 == 2.7x from 320x240.
+# Point patch: (160, 0) -> (1120, 720), i.e. 960x720 == 3.0x from 320x240.
+[[midasm_hook]]
+address = 0x823E7664
+name = "msxx_force_integer_playfield_scale"
+registers = ["f31", "f30", "f28", "f27"]
+after_instruction = false
+
+# [Graphics] Scoped playfield filtering.
+#
+# GameUpscaleFilter is intentionally no longer a global SDK sampler override:
+# menu/UI draws should keep the game's own bilinear filtering. While the real
+# ms_render_frame pass is inside ms_scene_render, force the game's min/mag
+# sampler wrapper arguments to the requested playfield filter (Point=0,
+# Linear=1). The off-pass 60fps replay calls the same begin/end helpers around
+# its direct ms_scene_render import in metalslugxx_hooks.cpp.
+[[midasm_hook]]
+address = 0x823F9CB4
+name = "msxx_begin_playfield_scene_filter_scope"
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x823F9CB8
+name = "msxx_end_playfield_scene_filter_scope"
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x824383F0
+name = "msxx_force_playfield_scene_sampler_filter"
+registers = ["r5"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82438598
+name = "msxx_force_playfield_scene_sampler_filter"
+registers = ["r5"]
+after_instruction = false
+
+# The playfield present path has its own sampler setup outside ms_scene_render:
+# 0x823E6D28/38 bind the 320x240 source for the 320->640 pass, while
+# 0x823E743C/4C bind the 640x480 intermediate for the final/front quad. Scope
+# GameUpscaleFilter to those call sites rather than every texture sample.
+[[midasm_hook]]
+address = 0x823E6D28
+name = "msxx_force_playfield_upscale_sampler_filter"
+registers = ["r5"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x823E6D38
+name = "msxx_force_playfield_upscale_sampler_filter"
+registers = ["r5"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x823E743C
+name = "msxx_force_playfield_upscale_sampler_filter"
+registers = ["r5"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x823E744C
+name = "msxx_force_playfield_upscale_sampler_filter"
+registers = ["r5"]
+after_instruction = false
+
 # [Game] SkipLogos — skip the boot logo sequence.
 #
 # ms_boot_logo_sequence (sub_82571500) plays three logos back to back (XBLA
@@ -4379,21 +5394,7 @@ labels = [0x822CC498, 0x822CC4C0, 0x822CC8D8, 0x822CC4F8, 0x822CC560]
 # when msxx_skip_boot_logos() (metalslugxx_hooks.cpp, reads [Game] SkipLogos) is
 # true, jumps to the instruction just past the loop instead of looping again.
 # When false the loop runs normally (the hook is a cheap bool read per frame).
-
-# [Game] Integer playfield scale (only when [Graphics] GameUpscaleFilter = Point).
 #
-# ms_present_playfield_upscale (0x823E7310) computes four FP registers before it
-# emits the final playfield quad:
-#   f31 = left, f30 = top, f28 = right, f27 = bottom
-#
-# Stock:  (208, 36) -> (1072, 684), i.e. 864x648 == 2.7x from 320x240.
-# Point patch: (160, 0) -> (1120, 720), i.e. 960x720 == 3.0x from 320x240.
-[[midasm_hook]]
-address = 0x823E7664
-name = "msxx_force_integer_playfield_scale"
-registers = ["f31", "f30", "f28", "f27"]
-after_instruction = false
-
 # XBLA "Arcade": tick 0x8256F420; loop 0x82571600; exit -> 0x82571610.
 [[midasm_hook]]
 address = 0x8257160C
@@ -4414,3 +5415,295 @@ address = 0x825716FC
 name = "msxx_skip_boot_logos"
 after_instruction = false
 jump_address_on_true = 0x82571700
+
+# [Game] DisableGoPopups — hide the idle "GO NOW" direction prompts.
+#
+# The stage entry setup calls the right-side initializer (which seeds state and
+# spawns the prompt child) and, for the stage range that uses it, the left-side
+# state initializer. Skip those setup calls first. The show-from-anchor functions
+# below copy the prompt anchor into the child object's data, then call show/play
+# helpers that build the visible prompt sprites and enqueue event 47 (SE se001);
+# those hooks are a second guard for any already-spawned or alternate-path prompt
+# object. When suppressing a live prompt object, the hook writes the child handler
+# back to its native begin-idle-delay state so it does not retry every frame.
+[[midasm_hook]]
+address = 0x8224A264
+name = "msxx_disable_go_popups"
+after_instruction = false
+jump_address_on_true = 0x8224A268
+
+[[midasm_hook]]
+address = 0x8224A28C
+name = "msxx_disable_go_popups"
+after_instruction = false
+jump_address_on_true = 0x8224A290
+
+[[midasm_hook]]
+address = 0x822210C8
+name = "msxx_disable_idle_move_prompt_right"
+registers = ["r3"]
+after_instruction = false
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x82221238
+name = "msxx_disable_idle_move_prompt_right"
+registers = ["r3"]
+after_instruction = false
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x82226ED8
+name = "msxx_disable_idle_move_prompt_left"
+registers = ["r3"]
+after_instruction = false
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x82227020
+name = "msxx_disable_idle_move_prompt_left"
+registers = ["r3"]
+after_instruction = false
+return_on_true = true
+
+# ---------------------------------------------------------------------------
+# [Game] FpsReplayDryRun — 60fps capture/replay dry-run (step A; off by default).
+#
+# Stands up the off-pass capture/replay plumbing with NO interpolation (phase 0),
+# so the off-pass frame must come out pixel-identical to the pass-0 frame. See
+# metalslugxx_hooks.cpp (msxx_fps_*) and MSXX_60FPS_FUNCTION_TARGETS.md (task A).
+# All four hooks early-out unless [Game] FpsReplayDryRun is True.
+
+# Capture buffer reset: ms_render_list_begin_frame entry (the once-per-frame list
+# zero). Clears the host capture vector so it mirrors this frame's build.
+[[midasm_hook]]
+address = 0x82236B60
+name = "msxx_fps_capture_begin_frame"
+after_instruction = false
+
+# Capture each producer sprite submit: ms_render_list_add_sprite(obj r3,
+# spriteId r4, xoff r5, yoff r6). Recorded in call order. Opens the suppression
+# bracket (g_in_sprite) so the nested add_entry calls insert_sprite makes are NOT
+# captured as standalone UI entries (the Sprite op regenerates them on replay).
+[[midasm_hook]]
+address = 0x82236BB8
+name = "msxx_fps_capture_add_sprite"
+registers = ["r3", "r4", "r5", "r6"]
+after_instruction = false
+
+# Close the suppression bracket: ms_render_list_add_sprite converged exit
+# (0x82236D1C, the addi r1 reached by both the normal and the id==0xFFFF early-out
+# paths, after insert_sprite has returned).
+[[midasm_hook]]
+address = 0x82236D1C
+name = "msxx_fps_capture_add_sprite_end"
+after_instruction = false
+
+# Weapon-HUD producer brackets — tag the bottom-left weapon-selection indicator's add_sprite ops as
+# hudFixed so the off-pass replays them at the REAL camera (else the inter-tick camera shift, issue #5,
+# slides this screen-fixed indicator). Two producers, both running on the weapon-panel widget object and
+# baking the camera into xoff/yoff: the icon strip (caps 139/141 + weapon icons) and the slot-range
+# selection draw. The log proved tagging by object type is unsafe (type 45 is reused by world objects),
+# so we classify by FUNCTION. See msxx_fps_weapon_hud_* and CapturedOp::hudFixed in metalslugxx_hooks.cpp.
+# ms_hud_weapon_select_draw_icon_strip (0x82228B18): ENTRY + converged exit (addi r1,r1,160 @0x82228C94).
+[[midasm_hook]]
+address = 0x82228B18
+name = "msxx_fps_weapon_hud_enter"
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82228C94
+name = "msxx_fps_weapon_hud_leave"
+after_instruction = false
+
+# ms_hud_weapon_slot_range_update_draw (0x82229BA8): ENTRY + its TWO converged exits (addi r1,r1,176 @
+# 0x8222A548 and 0x8222A56C).
+[[midasm_hook]]
+address = 0x82229BA8
+name = "msxx_fps_weapon_hud_enter"
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x8222A548
+name = "msxx_fps_weapon_hud_leave"
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x8222A56C
+name = "msxx_fps_weapon_hud_leave"
+after_instruction = false
+
+# Capture the SECOND high-level producer: ms_obj_anim_stream_emit_sprite(obj r3,
+# cmdPtr r4, animState r5) — the anim-stream sprite interpreter (0x822389E0) that
+# the main animated entities (player/enemies/projectiles) draw through. Without
+# this they were recorded as low-level Entry ops and replayed verbatim (never
+# lerped). It reads the SAME pose layout as add_sprite ([obj+0x88]->pose+0x18/0x1c,
+# prev +0x20/0x24), so the existing pose lerp applies unchanged. Opens g_in_sprite
+# to suppress the nested add_entry the producer makes (the Producer2 op regenerates
+# it on replay).
+[[midasm_hook]]
+address = 0x822389E0
+name = "msxx_fps_capture_anim_stream"
+registers = ["r3", "r4", "r5"]
+after_instruction = false
+
+# Close the producer-2 suppression bracket: ms_obj_anim_stream_emit_sprite converged
+# exit (0x82238C10, the `mr r3,r22` reached by both the post-insert_sprite path and
+# every early-out beq).
+[[midasm_hook]]
+address = 0x82238C10
+name = "msxx_fps_capture_anim_stream_end"
+after_instruction = false
+
+# Capture each UI/glyph append: ms_render_list_add_entry(r3..r9) — all seven arg
+# registers, so the HUD survives the off-pass rebuild (replayed verbatim). Only
+# top-level calls are captured; calls nested inside add_sprite are suppressed.
+[[midasm_hook]]
+address = 0x821FC4E8
+name = "msxx_fps_capture_add_entry"
+registers = ["r3", "r4", "r5", "r6", "r7", "r8", "r9"]
+after_instruction = false
+
+# Capture the pending-sprite-batch SEAL: ms_render_list_sort_seal_batch(r3). Must
+# be replayed in call order with add_sprite or the sprite counters corrupt and the
+# flush crashes. (r3 = sort key/range.)
+[[midasm_hook]]
+address = 0x82236798
+name = "msxx_fps_capture_seal"
+registers = ["r3"]
+after_instruction = false
+
+# Flush-seam probe: ms_render_list_flush entry. NOTE (logs 191/193): this flush is
+# 30Hz (1x/tick), NOT the per-present seam the locked plan assumed — so it can't
+# host the tween. Reverted to PROBE-ONLY (the rebuild was removed; it had wiped the
+# sprite list). Kept for the cadence counter. No register args.
+[[midasm_hook]]
+address = 0x821FC5E8
+name = "msxx_fps_flush_driver"
+after_instruction = false
+
+# Per-present (60Hz) seam PROBE: ms_upscale_playfield_to_640x480 (0x823E6DF0) entry.
+# Confirmed (log 194) the real per-present seam — 2x/tick on the fiber, idx_in_tick
+# alternating 0/1 (idx 1 = off-pass). Under MSXX_FPS_PROBE it logs the cadence. It also
+# maintains g_upscale_index (the present # within the tick) which the guest-side source
+# redirect below keys off to identify present #0. No register args.
+[[midasm_hook]]
+address = 0x823E6DF0
+name = "msxx_fps_upscale_probe"
+after_instruction = false
+
+# IN-CONTEXT off-pass driver (the CHOSEN direction; MSXX_60FPS_OFFPASS_FEED_OPTIONS.md DECISION):
+# ms_render_frame (0x823F9C78), at 0x823F9CBC — right after the real do-scene trio returns
+# (setup 0x823E6F60 -> scene_render 0x82250390 -> finish 0x823E7018, the bl @0x823f9cb0/b4/b8) and
+# BEFORE the frame-counter bump (lis r9,-32045 @0x823f9cbc). r31 = the saved do_scene arg
+# (mr r31,r3 @0x823f9c8c); the trio ran only when r31!=0. Under FpsReplayDryRun/FpsInterpolate
+# the driver rebuilds g_capture_ready (lerped) and re-draws it into
+# the 320x240 scene EDRAM via setup_playfield_target + scene_render. In-context the scene RT binds
+# the correct tile (the upscale hook bound the wrong one -> black, log 205). The lerped EDRAM is
+# resolved into guest buffer B and shown at the leading present by msxx_fps_redirect_scene_source.
+[[midasm_hook]]
+address = 0x823F9CBC
+name = "msxx_fps_render_frame_driver"
+registers = ["r31"]
+after_instruction = false
+
+# Guest-side off-pass source redirect (MSXX_60FPS_GUEST_REDIRECT_PLAN.md step 3): the
+# `bl ms_d3d_set_texture` inside ms_bind_playfield_upscale_draw_state (0x823E6D00). r5 = the scene
+# source texture object (= [state+0x14]). The lerped frame LEADS (issue #2 direction fix): redirect
+# present #0's re-run (g_upscale_index==0; the bind precedes the upscale that bumps the index) so the
+# leading present upscales the lerped mid(N-1,N) while present #1 shows the real scene N -> monotonic
+# prev->mid->cur. B_tex is filled before both presents, so it's ready for present #0. Active while
+# FpsReplayDryRun/FpsInterpolate is active and B_tex has been created; inert otherwise.
+[[midasm_hook]]
+address = 0x823E6DA8
+name = "msxx_fps_redirect_scene_source"
+registers = ["r5"]
+after_instruction = false
+
+# #4 position probe (verify tool, gated by MSXX_FPS_ISPROBE=1): ms_render_list_insert_sprite (0x82200170)
+# ENTRY — the chokepoint where both producers hand off a sprite with its FINAL baked screen position.
+# r4 = cel/frame-record ptr, r5 = screenX, r6 = screenY, r7 = xoff, r8 = yoff. Logged at capture AND
+# replay; confirmed the per-emit pose-capture fix for the player torso/legs collapse. See msxx_fps_probe_insert_sprite.
+[[midasm_hook]]
+address = 0x82200170
+name = "msxx_fps_probe_insert_sprite"
+registers = ["r4", "r5", "r6", "r7", "r8"]
+after_instruction = false
+
+# ---------------------------------------------------------------------------
+# 60fps #5 BACKGROUND probe (diagnostic, default OFF; env MSXX_FPS_BGPROBE_SKIP =
+# "tile" | "page" | "effect"). Each hook sits at the ENTRY of one candidate
+# scene_render background pass and, when its skip-gate returns true (armed env AND
+# g_replaying = the off-pass redraw only), returns from that pass before its
+# prologue runs. The skipped layer is then present on the real frame but missing
+# on the interpolated off-pass, so the pass that draws the stepping backdrop
+# FLICKERS at 30Hz — isolating which pass to vertex-shift for smooth scroll. The
+# real frame and all non-off-pass callers are unaffected (gate is g_replaying).
+# See msxx_bgprobe_skip_* in metalslugxx_hooks.cpp.
+
+# "tile": ms_background_draw_tile_sprite_batches (the tilemap/background batch pass).
+[[midasm_hook]]
+address = 0x822031D0
+name = "msxx_bgprobe_skip_tile"
+after_instruction = false
+return_on_true = true
+
+# "page": the three page-entry queue flushes (parallax/background page records).
+[[midasm_hook]]
+address = 0x821F9038
+name = "msxx_bgprobe_skip_page"
+after_instruction = false
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x821F9230
+name = "msxx_bgprobe_skip_page"
+after_instruction = false
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x821F90F8
+name = "msxx_bgprobe_skip_page"
+after_instruction = false
+return_on_true = true
+
+# "effect": the three effect-quad queue flushes.
+[[midasm_hook]]
+address = 0x821FE328
+name = "msxx_bgprobe_skip_effect"
+after_instruction = false
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x821FF348
+name = "msxx_bgprobe_skip_effect"
+after_instruction = false
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x821FFD80
+name = "msxx_bgprobe_skip_effect"
+after_instruction = false
+return_on_true = true
+
+# ---------------------------------------------------------------------------
+# 60fps #5 BACKGROUND interpolation — per-slot snapshot-lerp of the PAGE pass.
+# The page-entry queue flushes (probe-confirmed as the stepping backdrop) draw one
+# record at a time through ms_render_draw_sprite_page_entry (0x82206E68). The backdrop
+# is UV-scrolled fixed quads, so the ENTRY hook snapshots each record's 8 UV+geometry
+# fields per tick keyed by record address (= screen cell) and, on the off-pass
+# (g_replaying), writes lerp(prev,cur,t=0.5) into the live record; the EXIT hook at the
+# converged epilogue (0x8220714C) restores it. Sprite/backdrop X+Y sync also needs the
+# off-pass camera lerp in msxx_fps_render_frame_driver. Gated FpsInterpolate +
+# g_replaying, so the real frame is untouched. Diagnostics/tuning: MSXX_FPS_BG_SNAPPX /
+# _DEBUGPX / _DIAG.
+[[midasm_hook]]
+address = 0x82206E68
+name = "msxx_fps_bg_shift_page_entry"
+registers = ["r3"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x8220714C
+name = "msxx_fps_bg_restore_page_entry"
+after_instruction = false

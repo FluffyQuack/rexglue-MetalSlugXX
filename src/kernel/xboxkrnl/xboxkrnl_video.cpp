@@ -13,6 +13,8 @@
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <string>
 
 #include <rex/cvar.h>
@@ -466,6 +468,39 @@ void VdSwap_entry(mapped_void buffer_ptr,      // ptr into primary ringbuffer
     return;
   }
   gpu_fetch.base_address = frontbuffer_physical_address >> 12;
+
+  // DIAGNOSTIC (env REX_LOG_VDSWAP=1): host-side probe of the guest present
+  // cadence, used to decide the MSXX 60fps "hijack the GPU swap" plan (choice #1
+  // in MSXX_60FPS_FUNCTION_TARGETS.md). VdSwap is the single guest->host present
+  // boundary: every present the title issues lands here exactly once. Logging the
+  // frontbuffer physical address + inter-swap wall-time delta answers the one
+  // open question the static decode could not: does the title issue TWO distinct
+  // VdSwaps per 30 Hz tick (a re-usable second present slot we can redirect to a
+  // lerped frontbuffer), or only ONE (the "60 Hz" rate is host re-paint on vblank
+  // and there is no second guest swap to repurpose)?
+  //   - Two swaps/tick, SAME address  -> second present slot exists; the off-pass
+  //     must resolve a *distinct* frontbuffer for the lerped image.
+  //   - Two swaps/tick, DIFFERENT addr -> the title already double-buffers; redirect
+  //     the off-pass swap to our lerped buffer.
+  //   - One swap/tick (~33 ms gaps)    -> choice #1 needs a *new* injected swap, not
+  //     a repurposed one (heavier).
+  static const bool s_log_vdswap = [] {
+    const char* s = std::getenv("REX_LOG_VDSWAP");
+    return s && s[0] && s[0] != '0';
+  }();
+  if (s_log_vdswap) {
+    using clock = std::chrono::steady_clock;
+    static clock::time_point s_last{};
+    static uint64_t s_count = 0;
+    const clock::time_point now = clock::now();
+    double dt_ms = 0.0;
+    if (s_count != 0) {
+      dt_ms = std::chrono::duration<double, std::milli>(now - s_last).count();
+    }
+    s_last = now;
+    REXKRNL_INFO("VdSwap #{} front_phys=0x{:08X} {}x{} dt={:.2f}ms", s_count++,
+                 frontbuffer_physical_address, uint32_t(*width), uint32_t(*height), dt_ms);
+  }
 
   auto texture_format = rex::graphics::xenos::TextureFormat(texture_format_ptr.value());
   auto color_space = *color_space_ptr;

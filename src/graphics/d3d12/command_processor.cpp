@@ -10,7 +10,9 @@
  */
 
 #include <algorithm>
+#include <chrono>
 #include <cstdarg>
+#include <cstdlib>
 #include <cstring>
 #include <sstream>
 #include <utility>
@@ -2955,8 +2957,9 @@ bool D3D12CommandProcessor::IssueCopy() {
   ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(d3d12_readback_resolve));
   if (readback_mode == ReadbackResolveMode::kDisabled) {
     uint32_t written_address, written_length;
-    return render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
-                                         written_address, written_length);
+    bool ok = render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
+                                            written_address, written_length);
+    return ok;
   }
   return IssueCopy_ReadbackResolvePath();
 }

@@ -931,19 +931,13 @@ uint32_t D3D12TextureCache::GetActiveTextureBindlessSRVIndex(
   return descriptor_index;
 }
 
-// [MSXX] Override the filter used for *every* texture the game samples, so the
-// whole pixel-art chain can be forced crisp (or smooth) in one switch. Metal Slug
-// XX draws its sprite/background atlases (tiled=0) onto a native ~320x240 frame,
-// then resolves that to a tiled render target and upscales it (tiled=1) up to
-// 1280x720. Both stages are plain texture samples, so the override has to cover
-// both -- restricting it to the tiled upscale leaves the sprite draws smoothed.
-//   "default" - keep the guest's chosen filter (stock behavior).
-//   "linear"  - force bilinear everywhere (smoothest).
-//   "point"   - force nearest everywhere, anisotropy off (crisp pixel-art look).
-// Affects menus too (they are pixel art as well). Driven from metalslugxx.ini
-// [Graphics] GameUpscaleFilter.
+// [MSXX] Playfield filter selector driven by metalslugxx.ini [Graphics]
+// GameUpscaleFilter. This used to be consumed here as a whole-frame sampler
+// override, but that made menus and other UI inherit point filtering. The game
+// side now scopes min/mag filter changes to the 320x240 playfield render and
+// present path; shader-side playfield smoothing fixes still read this cvar.
 REXCVAR_DEFINE_STRING(game_upscale_filter, "default", "GPU",
-                      "Whole-frame texture filter override: default, linear, point");
+                      "MSXX playfield texture filter: default, linear, point");
 
 // [MSXX] diagnostic, strip later. Untile a 2D tiled k_8_8_8_8 (resolved-RT)
 // texture straight from guest memory and write it as an uncompressed 24-bit BMP
@@ -1068,30 +1062,6 @@ D3D12TextureCache::SamplerParameters D3D12TextureCache::GetSamplerParameters(
     parameters.mip_linear = mip_filter == xenos::TextureFilter::kLinear;
   }
   parameters.mip_base_map = mip_base_map;
-
-  // [MSXX] Apply the whole-frame filter override (see cvar above). Metal Slug XX
-  // builds its image in several sampling stages: it first draws its pixel-art
-  // sprite/background atlases (linear-layout, tiled=0, usually with anisotropy)
-  // onto a native ~320x240 playfield, then resolves that frame to a tiled render
-  // target and upscales it through 640x480 -> 860x480 -> 1280x720 (tiled=1).
-  // Forcing the filter on *every* sampled texture is what makes the entire chain
-  // nearest-neighbour; gating to tiled-only (as we did at first) left the
-  // sprite-draw stage smoothed, so only the final upscale ever looked crisp.
-  {
-    const std::string& filter_override = REXCVAR_GET(game_upscale_filter);
-    if (filter_override == "linear") {
-      parameters.mag_linear = 1;
-      parameters.min_linear = 1;
-    } else if (filter_override == "point") {
-      parameters.mag_linear = 0;
-      parameters.min_linear = 0;
-      parameters.mip_linear = 0;
-      // Anisotropic filtering selects D3D12_FILTER_ANISOTROPIC below regardless of
-      // the min/mag flags, which is a smooth filter -- so it must be disabled too,
-      // or the pixel-art sprites (sampled at aniso=3) stay smoothed.
-      parameters.aniso_filter = xenos::AnisoFilter::kDisabled;
-    }
-  }
 
   // [MSXX] Diagnostic: log each unique sampled texture (base, size, format) with
   // the filters actually applied, once per distinct combination. Goal: identify

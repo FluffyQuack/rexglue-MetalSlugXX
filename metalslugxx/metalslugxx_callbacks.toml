@@ -373,8 +373,8 @@
 "0x82277510" = { }
 "0x82277A40" = { }
 "0x82279910" = { }
-"0x82279D10" = { }
-"0x82279FF0" = { }
+"0x82279D10" = { name = "ms_player_state_body_anim_gravity_tail" } # callback/state handler; runs the player body anim stream then common player tail
+"0x82279FF0" = { name = "ms_player_body_part_child_anim_handler" } # torso/legs child-node handler; validates parent and advances its anim stream
 "0x8227A798" = { }
 "0x8227AC28" = { }
 "0x8227AFD0" = { }

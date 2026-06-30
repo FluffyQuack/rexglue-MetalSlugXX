@@ -432,6 +432,9 @@ class VulkanCommandProcessor : public CommandProcessor {
 
   void ClearTransientDescriptorPools();
   bool IssueCopy_ReadbackResolvePath();
+  // DIAGNOSTIC (env REX_LOG_RESOLVE=1): logs EDRAM resolve destinations for the MSXX
+  // 60fps swap-hijack probe. See MSXX_60FPS_FUNCTION_TARGETS.md.
+  void LogResolveForFpsProbe(uint32_t written_address, uint32_t written_length);
   bool IssueDraw_MemexportReadbackFullPath(uint32_t total_size);
   bool IssueDraw_MemexportReadbackFastPath(uint32_t total_size);
 

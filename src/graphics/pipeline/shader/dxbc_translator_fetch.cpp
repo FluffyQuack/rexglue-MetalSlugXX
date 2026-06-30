@@ -74,6 +74,18 @@ REXCVAR_DEFINE_UINT32(game_lowres_tiled_max_width, 480, "GPU/Shader",
 namespace rex::graphics {
 using namespace ucode;
 
+namespace {
+
+constexpr uint64_t kMsxxPlayfieldEdgeUpscalePixelShaderHash = 0x393FE019CFCD7864ull;
+
+bool MsxxPointPlayfieldShaderWorkaroundEnabled(const Shader& shader) {
+  return shader.type() == xenos::ShaderType::kPixel &&
+         shader.ucode_data_hash() == kMsxxPlayfieldEdgeUpscalePixelShaderHash &&
+         REXCVAR_QUERY(std::string, game_upscale_filter) == "point";
+}
+
+}  // namespace
+
 void DxbcShaderTranslator::ProcessVertexFetchInstruction(
     const ParsedVertexFetchInstruction& instr) {
   if (emit_source_map_) {
@@ -755,25 +767,18 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
     // be floored as expected, but the left/upper pixel is still sampled
     // instead.
     const float rounding_offset = 1.5f / 1024.0f;
-    // [MSXX] When the whole-frame "point" override is active, neutralize the
-    // game's edge-directed pixel-art upscaler. That filter (PS hash 393FE019...,
-    // a hq2x/2xSaI/SuperEagle-style algorithm) point-taps the source texture at
+    // [MSXX] When Point is selected, neutralize the playfield's edge-directed
+    // pixel-art upscaler. That filter (PS hash 393FE019CFCD7864, a
+    // hq2x/2xSaI/SuperEagle-style algorithm) point-taps the source texture at
     // +/-1 texel offsets and blends them in ALU according to per-edge colour
-    // comparisons, so it is invisible to both the hardware sampler we force to
-    // point AND the getTextureWeights nearest-rounding. Forcing every real
-    // texture-fetch's in-plane (X/Y) offset to zero makes all of its taps read
-    // the SAME texel as the centre, so every neighbour difference is 0, every
-    // edge test fails, and every blend collapses to the centre texel = pure
-    // nearest-neighbour -- regardless of how the algorithm branches. Single-tap
-    // menu/sprite fetches already use a zero offset, so this is a no-op for them.
-    // Gated on kTextureFetch only (getWeights/getCompTexLOD are handled
-    // elsewhere); offset_z (3D depth / cube face selection) is left untouched so
-    // we never change which slice/face is sampled. Read once per shader-translate
-    // (cvar set before guest code runs); query-by-name as the cvar lives in the
-    // texture-cache TU. See also the getTextureWeights rounding below.
+    // comparisons. The game-side sampler hooks cannot affect that ALU blend, so
+    // force only this shader's in-plane X/Y offsets to zero: all taps read the
+    // centre texel, every neighbour difference is 0, and the blend collapses to
+    // nearest-neighbour. Menus and other shaders keep their original offsets.
+    // offset_z is left untouched so slices/faces are not changed.
     const bool msxx_point_zero_xy_offsets =
         instr.opcode == FetchOpcode::kTextureFetch &&
-        REXCVAR_QUERY(std::string, game_upscale_filter) == "point";
+        MsxxPointPlayfieldShaderWorkaroundEnabled(current_shader());
     const float msxx_offset_x =
         msxx_point_zero_xy_offsets ? 0.0f : instr.attributes.offset_x;
     const float msxx_offset_y =
@@ -1045,16 +1050,11 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
     // 0.5 has already been subtracted via offsets previously.
     a_.OpFrc(dxbc::Dest::R(system_temp_result_, used_result_nonzero_components), coord_src);
     // [MSXX] getTextureWeights returns the bilinear lerp factors (frac of the
-    // texel-space coordinate); the game's shader then lerps the texels itself, so
-    // this manual filter never passes through the hardware sampler that
-    // texture_cache.cpp forces to point. Metal Slug XX's in-game upscale is one of
-    // these shaders, which is why forcing point on the sampler left the playfield
-    // smoothed. When the whole-frame "point" override is active, round the lerp
-    // factors to the nearest texel (0 or 1) so the manual bilinear degenerates to
-    // manual nearest. Read once per shader translate (cvar is set before guest
-    // code runs), so no per-pixel cost; query-by-name because the cvar lives in
-    // the GPU TU. Filtering modes are otherwise ignored here (see FIXMEs above).
-    if (REXCVAR_QUERY(std::string, game_upscale_filter) == "point") {
+    // texel-space coordinate); any shader using those weights can do manual
+    // filtering outside the hardware sampler. Keep the old nearest-rounding
+    // behavior only for the known playfield smoothing shader so menu/UI shaders
+    // are not changed by GameUpscaleFilter=Point.
+    if (MsxxPointPlayfieldShaderWorkaroundEnabled(current_shader())) {
       a_.OpRoundNE(dxbc::Dest::R(system_temp_result_, used_result_nonzero_components),
                    dxbc::Src::R(system_temp_result_));
     }

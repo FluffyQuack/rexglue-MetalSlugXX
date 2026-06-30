@@ -71,19 +71,18 @@ class MetalslugxxApp : public rex::ReXApp {
     REXLOG_INFO("leona: marketplace_content_redirect = '{}'",
                 cfg.unlock_leona ? metalslugxx::kLeonaPackageName : "");
 
-    // Whole-frame filter override. The game smooths its pixel art twice: the
-    // sprite/background atlas draws (tiled=0) and the tiled (EDRAM-resolved)
-    // render-target upscale that builds the playfield. This cvar lets the SDK
-    // force linear/point on *all* of those samples (default = keep the game's own
-    // filtering). See metalslugxx_settings.h [Graphics] GameUpscaleFilter.
+    // Playfield filter selector. GameUpscaleFilter used to force all SDK
+    // texture sampling, including menus; now it scopes the game's own sampler
+    // state to the 320x240 playfield render/upscale path while shader-side
+    // playfield smoothing fixes read this cvar. See metalslugxx_settings.h.
     rex::cvar::SetFlagByName("game_upscale_filter", cfg.game_upscale_filter);
     REXLOG_INFO("graphics: GameUpscaleFilter -> game_upscale_filter = {}", cfg.game_upscale_filter);
 
     // The guest renders a 1280x720 front buffer; the presenter then stretches it
     // to the host window (e.g. 1080p) in the final pass, which by default uses a
-    // bilinear filter that re-smooths the frame after all the guest-side point
-    // sampling above. When the user asks for Point, force that final present
-    // stretch to nearest-neighbour too, so "Point" really is crisp end-to-end.
+    // bilinear filter. When the user asks for Point, force that host-window
+    // stretch to nearest-neighbour too, so the scoped playfield point path stays
+    // crisp after it leaves the guest 1280x720 frame.
     // Set before SetupPresentation (OnPostInitLogging runs first), so the present
     // sampler is built with this value.
     if (cfg.game_upscale_filter == "point") {

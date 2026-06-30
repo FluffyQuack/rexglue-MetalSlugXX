@@ -13,8 +13,12 @@
 // TOML config file loading
 
 #include <algorithm>
+#include <fstream>
 #include <map>
+#include <optional>
 #include <set>
+#include <string_view>
+#include <vector>
 
 #include <fmt/format.h>
 
@@ -43,6 +47,108 @@ std::optional<uint32_t> ParseHexAddress(const std::string& keyStr) {
   } catch (...) {
     return std::nullopt;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Comment harvesting -- toml++ discards comment text, so we read the raw file
+// lines and re-associate comments with [functions] entries by source line.
+// ---------------------------------------------------------------------------
+
+/// Read a file into a vector of lines (newline stripped). Empty on failure.
+std::vector<std::string> ReadFileLines(const std::filesystem::path& path) {
+  std::vector<std::string> lines;
+  std::ifstream f(path);
+  if (!f)
+    return lines;
+  std::string line;
+  while (std::getline(f, line)) {
+    if (!line.empty() && line.back() == '\r')
+      line.pop_back();  // tolerate CRLF
+    lines.push_back(std::move(line));
+  }
+  return lines;
+}
+
+/// Trim leading spaces/tabs from a view.
+std::string_view LTrim(std::string_view s) {
+  size_t i = 0;
+  while (i < s.size() && (s[i] == ' ' || s[i] == '\t'))
+    ++i;
+  return s.substr(i);
+}
+
+/// Trim trailing spaces/tabs/CR from a view.
+std::string_view RTrim(std::string_view s) {
+  while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r'))
+    s.remove_suffix(1);
+  return s;
+}
+
+/// Strip the leading '#' marker (and one optional following space) from a
+/// full-line comment, returning the trimmed body text.
+std::string StripCommentMarker(std::string_view trimmedLine) {
+  std::string_view body = trimmedLine;
+  if (!body.empty() && body.front() == '#')
+    body.remove_prefix(1);
+  if (!body.empty() && body.front() == ' ')
+    body.remove_prefix(1);
+  return std::string(RTrim(body));
+}
+
+/// Return the inline comment body on a TOML entry line (text after the first
+/// '#' that is outside a quoted string), or nullopt if there is none.
+std::optional<std::string> InlineComment(const std::string& line) {
+  char quote = 0;
+  for (size_t i = 0; i < line.size(); ++i) {
+    char c = line[i];
+    if (quote) {
+      if (c == quote)
+        quote = 0;
+    } else if (c == '"' || c == '\'') {
+      quote = c;
+    } else if (c == '#') {
+      std::string_view body(line);
+      body.remove_prefix(i + 1);
+      if (!body.empty() && body.front() == ' ')
+        body.remove_prefix(1);
+      return std::string(RTrim(body));
+    }
+  }
+  return std::nullopt;
+}
+
+/// Harvest the comment attached to a [functions] entry on line `entryLine1Based`
+/// (1-based, as reported by toml++): the inline comment on that line, plus any
+/// contiguous full-line '#' comments immediately above it (stopping at the first
+/// blank or non-comment line). Markers are stripped; lines joined with '\n'.
+std::string HarvestComment(const std::vector<std::string>& lines, size_t entryLine1Based) {
+  if (entryLine1Based == 0 || entryLine1Based > lines.size())
+    return {};
+  const size_t idx = entryLine1Based - 1;  // 0-based index of the entry line
+
+  // Preceding contiguous full-line comments, collected bottom-up.
+  std::vector<std::string> preceding;
+  for (size_t i = idx; i-- > 0;) {
+    std::string_view trimmed = LTrim(lines[i]);
+    if (trimmed.empty() || trimmed.front() != '#')
+      break;  // blank or non-comment line ends the block
+    preceding.push_back(StripCommentMarker(trimmed));
+  }
+
+  std::string result;
+  // Emit preceding lines top-down.
+  for (auto it = preceding.rbegin(); it != preceding.rend(); ++it) {
+    if (!result.empty())
+      result += '\n';
+    result += *it;
+  }
+  // Then the inline comment, if any.
+  if (auto inlineText = InlineComment(lines[idx]); inlineText && !inlineText->empty()) {
+    if (!result.empty())
+      result += '\n';
+    result += *inlineText;
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -81,7 +187,8 @@ void MergeBool(bool& dst, bool src, bool present, const char* name) {
 // Apply a single parsed TOML table onto the config (merge semantics)
 // ---------------------------------------------------------------------------
 
-void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string& filePath) {
+void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string& filePath,
+               const std::vector<std::string>* rawLines = nullptr) {
   // --- Scalars: last wins ---
 
   // String scalars (only override if present in this file)
@@ -203,6 +310,9 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
       fcfg.end = (*table)["end"].value_or(0u);
       fcfg.name = (*table)["name"].value_or(std::string{});
       fcfg.parent = (*table)["parent"].value_or(0u);
+      if (rawLines) {
+        fcfg.comment = HarvestComment(*rawLines, key.source().begin.line);
+      }
 
       if (fcfg.size && fcfg.end) {
         REXCODEGEN_ERROR("Function 0x{:08X}: cannot specify both 'size' and 'end'", address);
@@ -390,7 +500,8 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
 
 bool ApplyTableWithIncludes(const toml::table& tbl, const std::filesystem::path& base_dir,
                             RecompilerConfig& cfg, std::set<std::string>& visited, uint32_t depth,
-                            const std::string& description);
+                            const std::string& description,
+                            const std::vector<std::string>* rawLines = nullptr);
 
 bool LoadRecursive(const std::filesystem::path& filePath, RecompilerConfig& cfg,
                    std::set<std::string>& visited, uint32_t depth) {
@@ -421,13 +532,15 @@ bool LoadRecursive(const std::filesystem::path& filePath, RecompilerConfig& cfg,
     return false;
   }
   REXCODEGEN_DEBUG("[config] loaded: {}", filePath.filename().string());
+  std::vector<std::string> rawLines = ReadFileLines(canonical);
   return ApplyTableWithIncludes(toml, canonical.parent_path(), cfg, visited, depth,
-                                filePath.filename().string());
+                                filePath.filename().string(), &rawLines);
 }
 
 bool ApplyTableWithIncludes(const toml::table& tbl, const std::filesystem::path& base_dir,
                             RecompilerConfig& cfg, std::set<std::string>& visited, uint32_t depth,
-                            const std::string& description) {
+                            const std::string& description,
+                            const std::vector<std::string>* rawLines) {
   // Process includes first (depth-first), so this table's own values win.
   if (auto* includesArray = tbl["includes"].as_array()) {
     for (const auto& elem : *includesArray) {
@@ -444,7 +557,7 @@ bool ApplyTableWithIncludes(const toml::table& tbl, const std::filesystem::path&
       }
     }
   }
-  ApplyToml(tbl, cfg, description);
+  ApplyToml(tbl, cfg, description, rawLines);
   return true;
 }
 

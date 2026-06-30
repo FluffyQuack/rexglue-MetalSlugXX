@@ -67,6 +67,15 @@ struct Config {
   // when this is True. See metalslugxx_config.toml and metalslugxx_hooks.cpp.
   bool skip_logos = true;
 
+  // DisableGoPopups = True : suppress the idle "GO NOW" direction prompts and
+  //                          their se001 sound cue during gameplay.
+  // DisableGoPopups = False: keep the prompts as on hardware.
+  //
+  // Implemented with [[midasm_hook]] return gates on the right/left prompt
+  // show/play state functions. When suppressed, the prompt object is pushed
+  // back into its native idle-delay state so it does not retry every frame.
+  bool disable_go_popups = false;
+
   // UnlockLeona = True : the playable character Leona is unlocked (default).
   // UnlockLeona = False: Leona stays locked, as on a console without the add-on.
   //
@@ -78,21 +87,61 @@ struct Config {
   // needed. See metalslugxx_dlc.h. Applied in OnPostInitLogging.
   bool unlock_leona = true;
 
+  // FpsReplayDryRun = True : enable the 60fps interpolation "replay dry-run"
+  //                         diagnostic (step A of the 60fps plan). On the second
+  //                         (off-)pass of each frame, clear the just-built render
+  //                         list and REBUILD it by replaying the captured
+  //                         ms_render_list_add_sprite / ms_render_list_add_entry
+  //                         calls verbatim (phase 0 -- identical positions, no
+  //                         lerp), then force the scene to render so the rebuilt
+  //                         list is flushed. With phase 0 the off-pass frame must
+  //                         be pixel-identical to the pass-0 frame; this validates
+  //                         the capture/replay machinery before the real
+  //                         interpolator is wired in. Compare frames via the F12
+  //                         guest-output screenshot path (metalslugxx_screenshot).
+  // FpsReplayDryRun = False: stock behaviour (default). The capture/replay hooks
+  //                         are inert (they early-out on the flag).
+  //
+  // See metalslugxx_hooks.cpp and the [[midasm_hook]]s in metalslugxx_config.toml
+  // (msxx_fps_*), plus MSXX_60FPS_FUNCTION_TARGETS.md (NEXT STEP, task A).
+  bool fps_replay_dryrun = false;
+
+  // FpsInterpolate = True : the real 60fps payoff. Arms the full off-pass path:
+  //                        capture/replay, guest buffer-B redirect, sprite pose
+  //                        interpolation, page-background interpolation, and the
+  //                        matching sub-pixel camera midpoint. Replayed sprites are
+  //                        re-emitted at the inter-tick MIDPOINT: the replay
+  //                        wrapper reads the native prev/current committed pose
+  //                        (pose+0x20/0x24 vs pose+0x18/0x1c, 16.16) and writes the
+  //                        phase-blended value (phase = pass/pass_count = 0.5 for
+  //                        the 2-pass case) into the current pose fields, calls
+  //                        ms_render_list_add_sprite (which bakes the lerped quad,
+  //                        incl. the anchor copy, since it reads the same fields),
+  //                        then RESTORES the real current pose so the sim is
+  //                        unaffected. UI (add_entry) and the cel/frame index are
+  //                        snapped, never lerped. A teleport clamp snaps sprites
+  //                        whose |cur-prev| exceeds ~48px (scene cuts / pose-commit
+  //                        bypassers) to avoid one-frame streaks. Requires the
+  //                        dry-run plumbing (validated 2026-06-24, log 175).
+  // FpsInterpolate = False: phase 0 (dry-run behaviour if FpsReplayDryRun, else
+  //                        inert). Default off.
+  bool fps_interpolate = false;
+
   // [Graphics]
   //
-  // GameUpscaleFilter controls the texture filter used for every texture the game
-  // samples -- both the pixel-art sprite/background draws and the tiled
-  // (EDRAM-resolved) render-target upscale that builds the in-game playfield --
-  // so the whole image can be forced crisp or smooth in one switch. Menus are
-  // pixel art too and are affected as well.
+  // GameUpscaleFilter controls the texture filter for the in-game playfield path
+  // only: sprite/background draws into the 320x240 scene target, the resolved
+  // render-target upscale, and the final playfield quad. Menus and other UI keep
+  // the game's own sampler choices.
   //   "default": keep the game's own filtering (stock; the native frame is
   //              point-doubled then bilinear-scaled, as on hardware).
-  //   "linear" : force bilinear everywhere (smoothest).
-  //   "point"  : force nearest everywhere, anisotropy off (crisp pixel-art look).
+  //   "linear" : force bilinear on the playfield path.
+  //   "point"  : force nearest on the playfield path (crisp pixel-art look).
   //
-  // Applied to the SDK `game_upscale_filter` cvar in OnPostInitLogging. Stored
-  // lowercased; an unrecognized value falls back to "default".
-  std::string game_upscale_filter = "default";
+  // Applied through scoped game hooks plus the SDK `game_upscale_filter` cvar
+  // for playfield shader workarounds. Stored lowercased; an unrecognized value
+  // falls back to "default".
+  std::string game_upscale_filter = "point";
 
   // SampleTexelBias shifts the source sample coordinate of every 2D texture
   // fetch by this many texels. It is a DIAGNOSTIC knob for the in-game upscale

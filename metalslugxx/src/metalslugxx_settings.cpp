@@ -145,16 +145,32 @@ std::string BuildIniText(const Config& c) {
         "// If true, skip the XBLA and SNK Playmore boot logos and go straight to the title screen\n"
      << "SkipLogos = " << BoolStr(c.skip_logos) << "\n"
      << "\n"
+        "// If true, hide the idle \"GO NOW\" direction prompts and silence their cue\n"
+     << "DisableGoPopups = " << BoolStr(c.disable_go_popups) << "\n"
+     << "\n"
         "// If true, unlock the playable character Leona\n"
      << "UnlockLeona = " << BoolStr(c.unlock_leona) << "\n"
      << "\n"
+        "// Diagnostic for the 60fps work\n"
+        //"// Diagnostic for the 60fps work: replay-dry-run. On the off-pass of each\n"
+        //"// frame, rebuild the render list from the captured sprite/entry calls\n"
+        //"// (phase 0, no interpolation) and re-render it; the result must match the\n"
+        //"// normal frame. Leave False unless validating the 60fps capture/replay.\n"
+     << "FpsReplayDryRun = " << BoolStr(c.fps_replay_dryrun) << "\n"
+     << "\n"
+        "// 60fps interpolation. Leave False for stock.\n"
+        //"// The full 60fps interpolation path: on the off-pass, re-emit sprites and\n"
+        //"// page backgrounds at the inter-tick midpoint, with the guest buffer-B\n"
+        //"// redirect and camera sync enabled automatically. Leave False for stock.\n"
+     << "FpsInterpolate = " << BoolStr(c.fps_interpolate) << "\n"
+     << "\n"
         "[Graphics]\n"
         "\n"
-        "// Texture filter for the game's graphics (sprites and the upscale; menus too):\n"
+        "// Texture filter for the in-game 320x240 playfield path:\n"
         "//   Default = the game's own filtering (smoothed, as on hardware)\n"
-        "//   Linear  = force smooth bilinear filtering everywhere\n"
-        "//   Point   = force crisp nearest-neighbour everywhere (also disables the\n"
-        "//             game's built-in pixel-art smoothing upscaler)\n"
+        "//   Linear  = force smooth bilinear filtering on the playfield\n"
+        "//   Point   = force crisp nearest-neighbour on the playfield (also disables\n"
+        "//             the game's built-in playfield smoothing upscaler)\n"
      << "GameUpscaleFilter = " << FilterDisplay(c.game_upscale_filter) << "\n"
      << "\n"
         //"// Diagnostic: shift in-game texture sampling by this many texels to tune the\n" /*Keep comments about this minimal as user isn't meant to change this*/
@@ -311,12 +327,39 @@ const Config& LoadConfig() {
     }
   }
 
+  if (auto it = map.find("game.disablegopopups"); it != map.end()) {
+    if (auto b = AsBool(it->second)) {
+      g_config.disable_go_popups = *b;
+    } else {
+      REXLOG_WARN("config: [Game] DisableGoPopups = '{}' is not a bool; using default ({})",
+                  it->second, g_config.disable_go_popups);
+    }
+  }
+
   if (auto it = map.find("game.unlockleona"); it != map.end()) {
     if (auto b = AsBool(it->second)) {
       g_config.unlock_leona = *b;
     } else {
       REXLOG_WARN("config: [Game] UnlockLeona = '{}' is not a bool; using default ({})", it->second,
                   g_config.unlock_leona);
+    }
+  }
+
+  if (auto it = map.find("game.fpsreplaydryrun"); it != map.end()) {
+    if (auto b = AsBool(it->second)) {
+      g_config.fps_replay_dryrun = *b;
+    } else {
+      REXLOG_WARN("config: [Game] FpsReplayDryRun = '{}' is not a bool; using default ({})",
+                  it->second, g_config.fps_replay_dryrun);
+    }
+  }
+
+  if (auto it = map.find("game.fpsinterpolate"); it != map.end()) {
+    if (auto b = AsBool(it->second)) {
+      g_config.fps_interpolate = *b;
+    } else {
+      REXLOG_WARN("config: [Game] FpsInterpolate = '{}' is not a bool; using default ({})",
+                  it->second, g_config.fps_interpolate);
     }
   }
 
@@ -398,12 +441,14 @@ const Config& LoadConfig() {
   ApplyKeyBind(map, "keyboard2.back", "Keyboard2", "Back", g_config.kb2_back);
 
   REXLOG_INFO("config: loaded {} -> [System] Sleep = {}, [System] Portable = {}, "
-              "[Game] TrialMode = {}, [Game] SkipLogos = {}, [Game] UnlockLeona = {}, "
+              "[Game] TrialMode = {}, [Game] SkipLogos = {}, [Game] DisableGoPopups = {}, "
+              "[Game] UnlockLeona = {}, "
               "[Graphics] GameUpscaleFilter = {}, [Graphics] SampleTexelBias = {}, "
               "[Graphics] LowresTiledBias = {}",
               path.string(), g_config.sleep ? "True" : "False",
               g_config.portable ? "True" : "False",
               g_config.trial_mode ? "True" : "False", g_config.skip_logos ? "True" : "False",
+              g_config.disable_go_popups ? "True" : "False",
               g_config.unlock_leona ? "True" : "False", g_config.game_upscale_filter,
               g_config.sample_texel_bias, g_config.lowres_tiled_bias);
   return g_config;

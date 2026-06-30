@@ -11,7 +11,9 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iterator>
 #include <mutex>
@@ -4406,11 +4408,40 @@ bool VulkanCommandProcessor::IssueCopy() {
   ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve));
   if (readback_mode == ReadbackResolveMode::kDisabled) {
     uint32_t written_address, written_length;
-    return render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
-                                         written_address, written_length);
+    bool ok = render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
+                                             written_address, written_length);
+    LogResolveForFpsProbe(written_address, written_length);
+    return ok;
   }
 
   return IssueCopy_ReadbackResolvePath();
+}
+
+// DIAGNOSTIC (env REX_LOG_RESOLVE=1): host-side probe of EDRAM resolve destinations,
+// for the MSXX 60fps "hijack the GPU swap" plan (MSXX_60FPS_FUNCTION_TARGETS.md, choice #1).
+// VdSwap logging (REX_LOG_VDSWAP) proved the title presents a SINGLE 720p frontbuffer
+// (phys 0x1F6F8000) ~60x/s (twice per 30 Hz tick), so the off-pass present slot already
+// exists but re-shows the stale buffer. The open question is the resolve cadence: which
+// resolve writes the 720p frontbuffer, and is it gated to pass 0 (30 Hz) while swaps run at
+// 60 Hz? If so, forcing that compose/resolve on the off-pass (after the lerped flush) is the
+// whole remaining job. Logs every resolve's dest phys address + length + inter-resolve dt.
+void VulkanCommandProcessor::LogResolveForFpsProbe(uint32_t written_address,
+                                                   uint32_t written_length) {
+  static const bool s_log = [] {
+    const char* s = std::getenv("REX_LOG_RESOLVE");
+    return s && s[0] && s[0] != '0';
+  }();
+  if (!s_log) {
+    return;
+  }
+  using clock = std::chrono::steady_clock;
+  static clock::time_point s_last{};
+  static uint64_t s_count = 0;
+  const clock::time_point now = clock::now();
+  double dt_ms = s_count ? std::chrono::duration<double, std::milli>(now - s_last).count() : 0.0;
+  s_last = now;
+  REXGPU_INFO("Resolve #{} dest_phys=0x{:08X} len={} dt={:.2f}ms", s_count++, written_address,
+              written_length, dt_ms);
 }
 
 bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
@@ -4423,6 +4454,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
                                      written_length)) {
     return false;
   }
+  LogResolveForFpsProbe(written_address, written_length);
 
   if (!written_length) {
     return true;
