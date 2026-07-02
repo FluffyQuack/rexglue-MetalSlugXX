@@ -834,6 +834,11 @@ void msxx_fps_capture_add_sprite(PPCRegister& r3, PPCRegister& r4, PPCRegister& 
   op.a[1] = r4.u32;  // spriteId (cel) — SNAP, never lerp
   op.a[2] = r5.u32;  // xoff (caller constant)
   op.a[3] = r6.u32;  // yoff (caller constant)
+  op.a[4] = GuestR32(r3.u32 + 0x38u);  // sprite-record table [obj+0x38] — object-identity token for the
+                                       // off-pass replay crash guard (see msxx_fps_replay_sprite). Like
+                                       // Producer2, add_sprite indexes this table (by the captured
+                                       // spriteId, recomp lwzx @0x82236CA0); a freed/reused object leaves
+                                       // it null/stale -> wild load. a[4..6] are otherwise Entry-only.
   op.hudFixed = g_in_weapon_hud_producer;  // weapon-HUD producer -> skip off-pass cam shift
   if (op.hudFixed) {  // snapshot the camera this op's xoff/yoff baked, for the off-pass restore
     op.hudCamX = static_cast<uint16_t>(GuestR16(kCameraX));
@@ -1147,7 +1152,27 @@ static void msxx_fps_replay_with_lerp(uint32_t obj, const CapturedOp& op, EmitFn
 
 // Producer #1: ms_render_list_add_sprite (HUD weapon, smoke, other add_sprite emitters).
 void msxx_fps_replay_sprite(const CapturedOp& op) {
-  g_emit_obj = op.a[0];  // attribute the off-pass insert_sprite to this object (position probe)
+  const uint32_t obj = op.a[0];
+
+  // CRASH GUARD (dropped-weapon pickup, log 293). Like Producer2, add_sprite recomputes the sprite
+  // record from VOLATILE object memory: it reads the sprite-record table [obj+0x38] and indexes it by
+  // the captured spriteId (recomp lwzx @0x82236CA0). We replay g_capture_ready (the PREVIOUS tick's
+  // list) one tick after capture; an entity that despawned in between — a weapon dropped on the ground
+  // then picked back up — has had [obj+0x38] freed/reused, so re-running bakes a wild table index into
+  // insert_sprite -> access violation (log 293: read of 0x1_0000021C = guest base + near-null, i.e.
+  // [obj+0x38] had gone null). The same two gates producer #2 uses fix it:
+  //   (1) liveness — obj must ALSO be in THIS tick's live set (else it despawned -> skip; a gone entity
+  //       correctly should not draw on the off-pass).
+  //   (2) identity — [obj+0x38] must still equal the captured table base (a[4]); a mismatch means the
+  //       address was recycled for a DIFFERENT entity (passes (1)) whose foreign/short table the captured
+  //       spriteId would index out of range -> wild load.
+  // No pose guard here (unlike producer #2): add_sprite legitimately draws pose-less HUD/UI sprites, and
+  // msxx_fps_replay_with_lerp already replays poseValid==false verbatim.
+  if (!ObjIsLiveThisTick(obj)) return;
+  const uint32_t table = GuestR32(obj + 0x38u);
+  if (!table || table != op.a[4]) return;
+
+  g_emit_obj = obj;  // attribute the off-pass insert_sprite to this object (position probe)
 
   // Camera-anchored HUD indicator (weapon-select strip, op.hudFixed): the producer baked xoff = camX +
   // const / yoff = camY + const, so inside add_sprite (screenX = poseX - camX + xoff) the camera cancels
