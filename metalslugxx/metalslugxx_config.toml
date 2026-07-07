@@ -440,11 +440,35 @@
 # producers @30Hz, present @60Hz. Off-pass interp plan in MSXX_60FPS_FUNCTION_TARGETS.md.
 "0x82250988" = { name = "ms_update_and_render_frame" }   # ONE rendered frame: pumps update subsystems (incl. ms_sound_update_event_queue 0x822056A8) then ms_render_frame per pass, iterating [0x82D29BA2] (=2) passes; do_scene = (r31==0?255:0) computed at 0x822509e4-ec so the scene re-flush runs on pass 0 only. Pass index r31 (advanced by [0x82DD0D80]) + count [0x82D29BA2] = the inter-tick phase for interpolation.
 "0x823E42B0" = { name = "ms_pump_render_queue" }   # per-pass render barrier (called at the tail of ms_render_frame): while ([[0x82D41B40]+0x24C] & 1) { clear the pending bit; ms_task_scheduler() } -- yields to the scheduler-driven render task (ms_render_task_fiber 0x823e4378) until its pending-work flag drains. This is where the off-thread present completes; it is why scene-draw is 30Hz but swap is 60Hz.
-"0x821f2078" = { name = "ms_offpass_update_dispatch" }   # the OFF-PASS-ONLY update call (gated on r31!=0 @0x822509c0 in ms_update_and_render_frame). Decoded 2026-06-24 (60fps Blocker 3, benign): a thin dispatcher on the scene-phase byte [0x82DD00E0] -- calls update routine 0x821f1e18(r3,r4=0) once (r3=1) normally, or twice (r3=0 then r3=1) when the phase is 7 or 8 (cmplwi 8/7 @0x821f208c/94). Touches NO render list and NO present, so repurposing the off-pass for the interpolation replay is safe; run the clear+replay+forced-render AFTER it.
+"0x821f2078" = { name = "ms_offpass_update_dispatch" }   # the OFF-PASS-ONLY update call (gated on r31!=0 @0x822509c0 in ms_update_and_render_frame). Decoded 2026-06-24 (60fps Blocker 3, benign): a thin dispatcher on the scene-phase byte [0x82DD00E0] -- calls ms_input_update_pad_state(r3,r4=0) once (r3=1) normally, or twice (r3=0 then r3=1) when the phase is 7 or 8 (cmplwi 8/7 @0x821f208c/94). Touches NO render list and NO present, so repurposing the off-pass for the interpolation replay is safe; run the clear+replay+forced-render AFTER it.
 "0x82250900" = { name = "ms_render_set_pass_count" }      # store the pass-count byte at 0x82D29BA2; sibling of ms_render_get_pass_count and the reset helper below.
 "0x82250910" = { name = "ms_render_get_pass_count" }      # return the pass-count byte at 0x82D29BA2; ms_update_and_render_frame uses this as the r31 loop bound/divisor (=2 in-game).
 "0x82250920" = { name = "ms_render_inc_pass_count" }      # increment and return the 0x82D29BA2 pass-count byte; called by scene/frontend setup paths outside the steady in-game loop.
 "0x82250950" = { name = "ms_render_reset_pass_state" }    # reset the adjacent 0x82D29BA0/A2/A4/A6 pass-state bytes/halfwords and seed 0x82D29BA2=2 before the scene draw/update loop.
+
+# --- gameplay input polling and action-bit processing (RE'd 2026-07-03) ---
+"0x823F9FB8" = { name = "ms_input_read_gamepad_action_mask" } # read the active controller record for player 0/1, map XInput buttons/sticks through the binding tables at 0x82BFB1F0/0x82BFB7F4, and return the 16-bit game action mask.
+"0x823FF840" = { name = "ms_input_lookup_bound_button_slot" } # scan one player's 8-entry binding table at 0x82BFB7F4 for an XInput button mask and return slot 0..7, or 8 when unbound.
+"0x821f1d98" = { name = "ms_input_apply_action_alias_mask" } # expand a raw action bitmask through the per-pad alias/remap table at 0x82CF17C0, ORing mapped halfwords for the caller's held/edge/repeat result.
+"0x821f1e18" = { name = "ms_input_update_pad_state" } # poll one player/pad via ms_input_read_gamepad_action_mask, update current/previous/pressed/repeat halfwords in 0x82CF17C0, and derive remapped masks.
+"0x821f1f50" = { name = "ms_input_update_pad_state_from_masks" } # same edge/repeat bookkeeping as ms_input_update_pad_state, but caller supplies previous/current masks directly instead of polling hardware.
+"0x821f2298" = { name = "ms_input_clear_player_snapshot" } # clear a player's published input snapshot blocks in 0x82DD04E0 and 0x82DCF7C0 for selected flag bits.
+"0x821f2350" = { name = "ms_input_clear_live_action_words" } # zero the first four live action words at 0x82DCF7C0 before a fresh input merge/publish.
+"0x821f2370" = { name = "ms_input_publish_live_to_player_snapshot" } # copy live action words/extended tables from 0x82DCEA80 into the selected player's 0x82DD04E0 snapshot according to flag bits.
+"0x821f2428" = { name = "ms_input_mark_action_pressed" } # mark a simple action id 1..100 as pressed for one player by setting the matching bit in both the live and player snapshot bitsets.
+"0x821f24a8" = { name = "ms_input_build_pressed_action_summary" } # scan player action bitsets and build the compact pressed-action summary at 0x82DCF140, used by scene/menu selection setup.
+"0x821f2550" = { name = "ms_input_mark_encoded_action_pressed" } # decode a packed action id into player/group/sub-action fields and set the corresponding extended action bit in summary and snapshot tables.
+"0x821f2680" = { name = "ms_input_is_action_summary_pressed" } # query the summary bitset at 0x82DCF140 for simple action id 1..100, returning 0xFF when present.
+"0x821f26e0" = { name = "ms_input_is_extended_action_pressed" } # query the extended player/group action table at 0x82DCF150 for a packed player/group/action triple, returning 0xFF when set.
+"0x821f2810" = { name = "ms_input_reset_action_state" } # zero the live input aggregate at 0x82DCEA80, clear the large action tables, then publish empty snapshots for player 0/1.
+"0x821f2890" = { name = "ms_input_merge_player_snapshots_to_live" } # OR the two player snapshots in 0x82DD04E0 back into the live aggregate at 0x82DCEA80 across simple and extended action words.
+"0x8242B778" = { name = "ms_xam_input_get_capabilities" } # thin tail wrapper to XamInputGetCapabilities.
+"0x8242B780" = { name = "ms_xam_input_get_state" } # thin tail wrapper to XamInputGetState.
+"0x8242B788" = { name = "ms_xam_input_get_gamepad_state" } # wrapper for XamInputGetState with flags=1, moving the caller's state pointer into r5.
+"0x8242B798" = { name = "ms_xam_input_set_state_checked" } # wrapper around XamInputSetState; probes capabilities and applies the small pre-call state fixup used by controller output paths.
+"0x8242B860" = { name = "ms_xam_input_set_state" } # default-flags wrapper for XamInputSetState that shifts caller arguments and passes flags=0.
+"0x8242B878" = { name = "ms_xam_input_get_keystroke_ex_ptr" } # XamInputGetKeystrokeEx wrapper taking a user-index pointer; user 255 is remapped to user 0 with the all-users flag.
+"0x8242B898" = { name = "ms_xam_input_get_keystroke_ex" } # XamInputGetKeystrokeEx wrapper taking the user index by value on the stack, with the same user-255 all-users handling.
 
 # --- render-task present fiber / present-side transition loop (RE'd 2026-06-25) ---
 "0x823E41D0" = { name = "ms_render_task_present_fiber" } # sibling cooperative fiber to ms_render_task_fiber: waits for [0x82D2A8B0], loops { ms_render_task_draw_present_transition ; ms_present_playfield_upscale ; ms_task_scheduler } until [0x82D2A8B4] is set, then runs one final present, resets D3D state, calls slot +0x14, clears the rendered flag, and yields
@@ -506,7 +530,7 @@
 "0x822500b0" = { name = "ms_scene_draw_dispatch" }     # the PRODUCER-WALK DISPATCHER. Reads draw-state byte [0x82D7D615]: ==1 -> call ms_obj_draw_dispatch_step (0x822068f8, one walk step) and return 1; ==0 -> the BUILD/INIT path (0x822500f0: zero scene-build state [0x82D7D5E0..E3], advance, dispatch sub-init handlers 0x8224fa68.. on [0x82D7D659]); >1 -> 0x822501ec. Returns nonzero while there is more draw/build work, so the drivers loop on it.
 "0x82204ce0" = { name = "ms_scene_draw_dispatch_thunk" } # lone `b 0x822500b0` (tail-thunk into ms_scene_draw_dispatch); called from the render-task drain loops 0x823dffb8 / 0x8237dbd4.
 "0x8237dbc8" = { name = "ms_scene_draw_drain" }        # tiny driver: `while (ms_scene_draw_dispatch_thunk() != 0) ;` -- drain the producer walk to completion in one shot (used outside the present-interleaved render-task loop).
-"0x8237dac8" = { name = "ms_scene_logic_step" }        # per-frame scene LOGIC/update step (called from ms_render_task_draw_frame @0x823dff64): copies scene-config bytes, ms_sound/anim setup (0x8223ea90), polls input twice (0x821f2370 or 0x821f2298 by scene mode), sets [0x82D7D636]=1, then runs the game-logic substeps 0x82205a80 / 0x82204d28 / 0x82204b60. (Update side; the draw walk is the dispatcher above.)
+"0x8237dac8" = { name = "ms_scene_logic_step" }        # per-frame scene LOGIC/update step (called from ms_render_task_draw_frame @0x823dff64): copies scene-config bytes, ms_sound/anim setup (0x8223ea90), publishes or clears input snapshots via ms_input_publish_live_to_player_snapshot/ms_input_clear_player_snapshot by scene mode, sets [0x82D7D636]=1, then runs the game-logic substeps 0x82205a80 / 0x82204d28 / 0x82204b60. (Update side; the draw walk is the dispatcher above.)
 "0x8223c6c8" = { name = "ms_scene_substate_step" }     # per-frame scene SUB-STATE machine (called by ms_scene_update @0x82250bd0; result stored to scene_sub+0x0c). Reads scene phase [0x82DD00E0] + flags ([0x82D7BA66], 0x82239748, 0x82249fe8, 0x82227588) and returns the next sub-state byte. DEFAULT/common return = 1 (0x8223c810) -> drives ms_scene_update to finish the current frame and return; returns 0 only on rare non-advancing sub-steps (loop-back), or a transition code via 0x823ea6c8.
 "0x821f1888" = { name = "ms_scene_should_exit" }       # ms_scene_update per-frame predicate (called @0x82250bbc): nonzero -> take the teardown exit 0x82250c58 (-> ms_scene_phase_reset_draw 0x82236618 + return); zero -> continue the frame.
 "0x82236678" = { name = "ms_scene_phase_step" }        # scene-PHASE state machine (NOT a render-list fn): dispatches on phase byte [0x82D7D659] (0..3), walks the 4-entry table at [0x82D7BA30] (8-byte stride) testing flag bit 0x08, advances via 0x822398d8/0x82248cf0/0x82250220, and on completion calls ms_scene_phase_reset_draw (0x82236618). Called once per frame from ms_scene_update @0x82250bc8.
@@ -958,12 +982,48 @@
 "0x82211C40" = { name = "ms_obj_collision_clear_edge_flags" } # clear the collision edge bits in obj+0xB8 while preserving the low slot index.
 "0x82211C50" = { name = "ms_obj_collision_ack_edge_flags" } # consume/clear collision edge bits in obj+0xB8 and update the global edge accumulator at 0x82D7CAC8.
 "0x82211CB8" = { name = "ms_collision_accumulate_object_bucket_weights" } # add weighted coverage for an object's screen-space position into the 16x16-ish collision occupancy buckets at 0x82D7C960.
-"0x822121C0" = { name = "ms_collision_resolve_hit_pair" } # apply one source/target hit result: update target damage/code/state fields, track min/max hit depths, trigger player/effect side effects, and call the hit callback path.
+"0x822121C0" = { name = "ms_collision_resolve_hit_pair" } # apply one source/target hit result: subtract target health at obj+0x8C, update target pending-hit/code fields, track min/max hit depths, trigger player/effect side effects, and call the hit callback path.
 "0x82212420" = { name = "ms_collision_debug_draw_object_hitboxes" } # draw every 0x8000-terminated hitbox rect in an object's collision descriptor when the debug flag at 0x82D7CA68 is enabled.
-"0x822124B8" = { name = "ms_collision_register_active_object" } # register one object's collision descriptor into the active buffer: clip hitboxes, set group/bucket bitsets, append object pointer, and save list slot in obj+0x94/+0x95.
-"0x822127C8" = { name = "ms_collision_process_candidate_hit" } # after a candidate object is selected, apply descriptor damage/remap rules, compute contact direction/angle metadata, debug-draw hitboxes, and resolve the pair.
+"0x822124B8" = { name = "ms_collision_register_active_object" } # register one object's collision descriptor into the active buffer: clip hitboxes, set descriptor group/side and bucket bitsets, append object pointer, and save list slot in obj+0x94/+0x95.
+"0x822127C8" = { name = "ms_collision_process_candidate_hit" } # after a candidate object is selected, apply descriptor damage/remap rules, write the target pending hit code at obj+0xAA and contact direction at obj+0xAB, debug-draw hitboxes, and resolve the pair.
 "0x82212B88" = { name = "ms_collision_test_candidate_object" } # test one active-list candidate object's hitboxes against the caller hitbox descriptor and dispatch to ms_collision_process_candidate_hit on overlap.
-"0x82212E40" = { name = "ms_collision_query_active_hitboxes" } # build candidate bitsets from the active buffer's group and bucket masks, iterate up to 64 stored object pointers, then debug-draw the caller hitboxes.
+"0x82212E40" = { name = "ms_collision_query_active_hitboxes" } # use the caller descriptor's side/group fields to intersect active-buffer masks, scan clipped bucket candidates, and dispatch overlap tests against up to 64 stored object pointers.
+
+# Enemy damage / defeat reward handoff (RE'd 2026-07-03). The generic
+# collision resolver applies health and pending-hit state first; these helpers
+# credit co-op player rewards and consume pending hit code 30 on enemy death paths.
+"0x8223FC40" = { name = "ms_score_add_to_player_mask" } # add a score/reward value to player 0/1 score buffers at 0x82D74770/0x82D74780 according to the low player-mask bits.
+"0x8223F930" = { name = "ms_collision_award_player_hit_rewards" } # co-op aware hit/kill reward dispatcher; visits player roots 0x82BD3E58/0x82BD3F20 from source obj+0xAC attribution bits and credits kill rewards when target obj+0x8C is zero.
+"0x8227ACA0" = { name = "ms_player_add_damage_reward_meter" } # player-side successful-damage reward meter update: resolves player index 0/1, adds damage<<5 into player_state+0x68, clamps at 0x4000, and starts +0x6A when filled.
+"0x822A5FC0" = { name = "ms_enemy_spawn_defeat_reward_from_hit30" } # pending-hit 30 defeat reward path: use obj+0xAC attribution bits to pick player 0/1, score through ms_score_add_to_player_mask, spawn/position the reward effect, then play event 46.
+"0x82387A28" = { name = "ms_enemy_composite_child_damage_update" } # composite enemy/boss damage tick: folds pending damage from child objects at state+0x2C/+0x30 into parent health obj+0x8C, mirrors child attribution obj+0xAC, and forwards hit30 kills to the reward path.
+"0x82392138" = { name = "ms_enemy_death_sequence_spawn_hit30_reward" } # death sequence phase handler: temporarily forces a linked target's pending hit code to 30, calls ms_enemy_spawn_defeat_reward_from_hit30, restores the code, then advances to the next death state.
+"0x823ACD30" = { name = "ms_enemy_damage_state_tick" } # enemy damage-state handler: registers collision, tracks pending-hit flags, handles code10 flinch side effects across player-bit lanes, and invokes the hit30 defeat reward before switching state.
+"0x823D5BB0" = { name = "ms_enemy_composite_part_damage_tick" } # multi-part enemy damage aggregator: walks linked child parts, folds child damage into parent health obj+0x8C, mirrors attribution flags, triggers death handling, and forwards hit30 children to the reward path.
+
+# Enemy-side player-hit query helpers (RE'd 2026-07-03). These are small wrappers
+# around ms_collision_query_active_hitboxes used by one enemy state family. The
+# fixed descriptor tables drive the player/enemy side filtering in the shared
+# collision query; these wrappers cache or react to the selected source object.
+"0x82252E68" = { name = "ms_enemy_query_player_side_hit_code6" } # query descriptor 0x8201A690; accept resolver result code 6 only, cache selected candidate from 0x82D8C940 into state+0, and return whether one was selected.
+"0x82252ED8" = { name = "ms_enemy_query_player_side_hit_any" } # query descriptor 0x8201A678; on any nonzero resolver result, cache selected candidate from 0x82D8C940 into state+0 and return whether one was selected.
+"0x82253158" = { name = "ms_enemy_probe_player_side_hit_passthrough" } # vtable helper: query descriptor 0x8201A630 for side-filtered active hitboxes, then return the caller-supplied object/argument unchanged.
+"0x82253228" = { name = "ms_enemy_state_check_player_side_hit" } # callback/state helper: advance pose/anim bookkeeping, query descriptor 0x8201A648, and transition into the stored-hit path when a side-filtered hit is found.
+"0x82253BD0" = { name = "ms_enemy_state_poll_player_side_hit_branches" } # state callback: refresh common anim/physics, branch through the any-hit and code6 player-side queries, and fall back to the range/offscreen state checks.
+"0x82253D10" = { name = "ms_enemy_state_track_target_poll_player_side_hits" } # state callback: track the stored target object, check distance/playfield bounds, then run the same any-hit and code6 player-side query branches.
+
+# Player attack collision producers (RE'd 2026-07-03). These are source-side
+# player weapon/contact objects that feed the generic collision resolver above,
+# so they map enemy damage from player attacks without naming enemy-vs-enemy hits.
+"0x822A5ED8" = { name = "ms_player_contact_attack_hitbox_table" } # return descriptor table 0x82010D54 used by close/contact player attack collision polling.
+"0x82278B30" = { name = "ms_player_poll_contact_attack_collision" } # reset player attack contact flags, select the contact-attack descriptor table, query active hitboxes, and set player_state+0x3A bit0 when a target overlaps.
+"0x8227A798" = { name = "ms_player_contact_attack_collision_update" } # player/contact attack callback: register the hitbox object, credit player-attributed hit rewards, then poll follow-up collision descriptors and impact sounds.
+"0x8227A968" = { name = "ms_player_classify_contact_attack_hit" } # query a contact-attack descriptor, read resolver min/max target globals, and classify the result into player_state+0x67 for the player state machine.
+"0x8225B960" = { name = "ms_player_arcing_projectile_init" } # initialize type-14 player attack projectile; set grid/collision/anim state, copy owner/variant data, and enter ms_player_arcing_projectile_update.
+"0x8225AF20" = { name = "ms_player_arcing_projectile_update" } # active arcing projectile state: integrate motion, register collision, query enemy hitboxes, award player-attributed damage/rewards, and transition to impact/explosion states.
+"0x8225BA48" = { name = "ms_player_arcing_projectile_explosion_update" } # post-impact/explosion state: one-shot reward/effect spawn, play event 46, and keep querying the stored explosion hitbox descriptor while active.
+"0x82292E88" = { name = "ms_player_straight_projectile_init" } # initialize type-127 straight player shot; copy owner lane, set +/-X velocity, collision descriptor 0x8201D368, short lifetime, and enter ms_player_straight_projectile_update.
+"0x82292A70" = { name = "ms_player_straight_projectile_update" } # active straight-shot state: register hitbox, award player damage meter and hit rewards on impact, query descriptor 0x8201D3B4, play impact sounds, and expire after state+0x0D ticks.
 
 # ---------------------------------------------------------------------------
 # GAMEPLAY LOGIC TICK — the sim-step seam (RE'd 2026-06-24, on the 60fps path).
@@ -1021,7 +1081,16 @@
 # that wires a live player object into the torso/legs sprite registration above.
 "0x8228B710" = { name = "ms_player_root_reset" }              # reset one player root object: install the first-frame activation handler (0x8228B5A8), clear player timers/flags, and reset the player's loop-sound state.
 "0x82289B40" = { name = "ms_player_root_enter_active_state" } # one-shot transition from the activation handler into a live player state: clears player state, selects the two body sprite types via ms_player_select_body_sprite_type, registers torso/legs cells via ms_player_register_body_sprite_cells, then chooses the state handler.
-"0x8228A900" = { name = "ms_player_state_common_update_tail" } # shared tail used by many player state handlers; runs timers/flags, invokes the per-state subhandler stored at player_state+0x10, then does common player collision/bookkeeping.
+"0x8228A900" = { name = "ms_player_state_common_update_tail" } # shared tail used by many player state handlers; runs timers/flags, invokes the per-state subhandler stored at player_state+0x10, consumes player pending hit codes via ms_player_apply_pending_hit_state, then does common player collision/bookkeeping.
+
+# Player pending-hit / damage-state helpers (RE'd 2026-07-03). The shared
+# collision path writes a pending hit code into base obj+0xAA and contact
+# direction into obj+0xAB; the player common tail consumes those codes here.
+"0x822780B0" = { name = "ms_player_select_state_variant" } # map a requested player state/mode through character/current-body tables, store player_state+0x35, and return 0xFF when the variant changed.
+"0x82278F98" = { name = "ms_player_apply_pending_hit_state" } # consume collision pending hit codes at obj+0xAA (notably 22 and 14), route them to player state variants 3/5, seed a short player_state+0x18 timer, and clear the pending code.
+"0x82278258" = { name = "ms_player_set_hurt_timer_if_longer" } # for player index 0/1, raise player_state+0x18 to at least the requested duration and mark player_state+0x3A bit2.
+"0x82278150" = { name = "ms_player_set_damage_lockout_both" } # for both live player roots, set base obj+0x25 bit6 and player_state+0x3B bit0, blocking/deferring pending damage handling.
+"0x822781E0" = { name = "ms_player_clear_damage_lockout_both" } # clear player_state+0x3B bit0 for both live player roots.
 
 # --- subsystem updaters, in the order ms_gameplay_tick calls them ---
 # (Each *_tick has an *_init counterpart invoked by ms_gameplay_init.)
@@ -1039,9 +1108,8 @@
 # 0x20 of [0x82D8CA68+0x04] is set; the bit is cleared afterward, so it is a
 # deferred / edge-triggered one-shot. For each live player object
 # (0x82BD3E58/0x82BD3F20, sentinel-checked) it ORs bit 0x02 into the player
-# sub-object (player+0xC0)+0x3B and writes state code 6 to player+0xAA -- i.e. it
-# forces both players into a state. [mechanism confirmed; exact state purpose tentative]
-"0x822782a0" = { name = "ms_tick_pending_player_event" }
+# sub-object (player+0xC0)+0x3B and writes pending hit code 6 to player+0xAA.
+"0x822782a0" = { name = "ms_tick_force_player_pending_hit_event" }
 
 # ---------------------------------------------------------------------------
 # Phase D, pass 1: resolve compile errors of the form
@@ -5653,14 +5721,20 @@ name = "msxx_fps_redirect_scene_source"
 registers = ["r5"]
 after_instruction = false
 
-# #4 position probe (verify tool, gated by MSXX_FPS_ISPROBE=1): ms_render_list_insert_sprite (0x82200170)
-# ENTRY — the chokepoint where both producers hand off a sprite with its FINAL baked screen position.
-# r4 = cel/frame-record ptr, r5 = screenX, r6 = screenY, r7 = xoff, r8 = yoff. Logged at capture AND
-# replay; confirmed the per-emit pose-capture fix for the player torso/legs collapse. See msxx_fps_probe_insert_sprite.
+# #4 position probe (verify tool, gated by MSXX_FPS_ISPROBE=1) + resolved-sprite capture (MSXX_FPS_RESOLVED,
+# MSXX_60FPS_RESOLVED_SPRITE_REFACTOR_PLAN.md): ms_render_list_insert_sprite (0x82200170) ENTRY — the
+# object-free chokepoint where both producers hand off a sprite with its FINAL baked screen position.
+# Full arg set (verified in recomp 0.cpp: sth r3,1638 / mr r22,r4 / mr r25,r5 / mr r27,r6 / mr r24,r7 /
+# mr r23,r8 / stb r9,1687 / stb r10,1695): r3 = sort/layer key, r4 = cel/frame-record ptr, r5 = screenX,
+# r6 = screenY, r7 = x sub-offset, r8 = y sub-offset, r9 = flags/type byte, r10 = flags byte. See
+# msxx_fps_probe_insert_sprite / CaptureResolvedSprite. r1 (LAST) is the caller's stack ptr, captured here
+# because this hook fires at insert_sprite ENTRY before its own `stwu` — the resolved off-pass replay reads
+# the four caller-frame slots insert_sprite reloads (caller_sp+0x97 alpha / +0x66,+0x6E scale / +0x9C obj)
+# and writes them back so the replayed insert_sprite runs its real draw path instead of the no-op early-out.
 [[midasm_hook]]
 address = 0x82200170
 name = "msxx_fps_probe_insert_sprite"
-registers = ["r4", "r5", "r6", "r7", "r8"]
+registers = ["r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r1"]
 after_instruction = false
 
 # ---------------------------------------------------------------------------

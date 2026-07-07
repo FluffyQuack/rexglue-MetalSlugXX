@@ -151,53 +151,18 @@ constexpr size_t kMaxCapturedEntryVisuals = 16;
 // reproduces the exact interleaving the build used (insertion order matters
 // within a layer bucket).
 struct CapturedOp {
-  enum class Kind : uint8_t { Sprite, Entry, Seal, Producer2 } kind;
-  // Sprite   : a[0..3] = ms_render_list_add_sprite(obj r3, spriteId r4, xoff r5, yoff r6)
-  // Producer2: a[0..2] = ms_obj_anim_stream_emit_sprite(obj r3, cmdPtr r4, animState r5)
-  //            — the SECOND high-level sprite producer (anim-stream interpreter, 0x822389E0).
-  //            The main animated entities (player/enemies/projectiles) draw through this, not
-  //            add_sprite, so they were captured as verbatim Entry ops and never lerped. It reads
-  //            the SAME pose layout as add_sprite ([obj+0x88]->pose+0x18/0x1c, prev +0x20/0x24,
-  //            verified in default.disasm.txt @0x82238b20/b2c/b38), so the identical pose lerp
-  //            applies. cmdPtr/animState are persistent animation data -> re-running with the same
-  //            args re-emits the same sprite (the fn has no obj/stream side effects; all stores hit
-  //            its stack). Converged exit 0x82238C10.
+  enum class Kind : uint8_t { Entry, Seal, ResolvedSprite } kind;
+  // ResolvedSprite: the off-pass sprite op. Captured at the object-free ms_render_list_insert_sprite
+  //            chokepoint (not at a producer), so the off-pass never touches volatile object memory (the
+  //            despawn/reuse crash class dissolves — plan §2/§9). a[0..6] carry the baked insert_sprite
+  //            args: a[0]=sortkey(r3), a[1]=record(r4), a[2]=screenX(r5, low16=int16), a[3]=screenY(r6),
+  //            a[4]=xsub(r7), a[5]=ysub(r8), a[6]=flag9|flag10<<8. resolvedLerpDX/DY + hudFixed drive the
+  //            screen-space lerp; submitState reproduces the ambient alpha/anchor.
   // Entry    : a[0..6] = ms_render_list_add_entry(r3..r9), replayed verbatim (no lerp)
   // Seal     : a[0]    = ms_render_list_sort_seal_batch(r3) — sorts the pending sprite
   //         batch into the flush array; producers call it between layer groups, so it
   //         must be replayed in-order or the sprite counters (0x5400/0x5402) corrupt.
   uint32_t a[7];
-
-  // Per-emit pose SNAPSHOT, taken at THIS producer call during the real walk (config #4 fix,
-  // log 239). A multi-part object (the player torso/legs) shares ONE pose+ONE object but the
-  // anim-stream interpreter applies a transient per-part offset to pose+0x1c/+0x24 (e.g. legs
-  // 244, torso 269 = +25) AROUND each emit, then reverts it — so by the time the off-pass
-  // replays, the live pose holds a single resting value and BOTH emits read it -> the parts
-  // collapse onto each other. We can't reproduce the between-emit interpreter writes, so instead
-  // we record the pose each emit actually saw (cur +0x18/+0x1c, prev +0x20/+0x24, 16.16 fixed)
-  // and write it back per-op before re-running that emit. poseValid is false for ops whose object
-  // had no pose ([obj+0x88]==0) -> replayed verbatim.
-  bool poseValid = false;
-  uint32_t poseCurX = 0, poseCurY = 0, posePrevX = 0, posePrevY = 0;
-
-  // Diagnostic for issue #3 (off-frame sprite SKIP). True if this emit actually reached
-  // ms_render_list_insert_sprite (i.e. drew a sprite, passing emit_sprite's four internal guards)
-  // during the REAL producer walk. Stamped at the producer EXIT hook from g_emit_reached_insert. On
-  // the off-pass we compare: an op with drewReal whose REPLAYED emit_sprite does NOT reach
-  // insert_sprite was killed by emit_sprite's internal guards (stale cmdPtr/animState/live obj reads)
-  // -> the skip bug. Producer2 only (add_sprite re-passes constant args, never re-reads).
-  bool drewReal = false;
-
-  // Issue #3 FIX (Producer2 only): the anim-stream interpreter mutates [animState+0x0e] (a per-emit
-  // counter) between emits, and emit_sprite skips the draw when its high byte >= 128 (guard #3,
-  // 0x82238a50). By the off-pass replay the live value has advanced past 128 even for an emit that
-  // DREW on the real walk -> the sprite vanishes (legs/enemies/debris). Snapshot the value this emit
-  // saw at producer entry and write it back around the replayed emit so the guard reproduces the real
-  // draw decision (the field is NOT used for positioning -- verified in the disasm). animValid is true
-  // only for Producer2 ops; Sprite/Entry leave it false. The full 16-bit field is restored (emit reads
-  // its high byte big-endian).
-  bool animValid = false;
-  uint16_t animCounter = 0;
 
   // Ambient render-submit state read by ms_render_list_insert_sprite, but NOT encoded in the
   // add_sprite / anim-stream arguments. The real object walk primes these immediately before each
@@ -213,16 +178,6 @@ struct CapturedOp {
   uint32_t anchorObj = 0;       // 0x82DCEA58
   uint16_t anchorScreenY = 0;   // 0x82DCEA5C
 
-  // Per-object render attributes consumed by add_sprite / emit_sprite before they call
-  // insert_sprite. The HUD weapon strip writes its fade alpha to obj+0x2b immediately before
-  // add_sprite; replaying one tick later was rereading the live object after that byte had advanced
-  // to 0xff. Snapshot the compact visual range the producers read, then restore it around replay so
-  // the stack args match the captured emit. objRender28 spans obj+0x28..0x2b, including that alpha byte.
-  bool objRenderStateValid = false;
-  uint8_t objRender1e = 0, objRender1f = 0;
-  uint32_t objRender20 = 0, objRender24 = 0, objRender28 = 0, objRender2c = 0, objRender30 = 0;
-  uint8_t objRender40 = 0;
-
   // Final render-list visual state captured at ms_render_list_add_entry. r7 points at an
   // already-baked 0x68 entry block, r5 is the block count, entry+0x1c carries each entry's object
   // alpha bits, and r6 becomes the layer alpha byte. Patching these values back on replay covers
@@ -231,25 +186,45 @@ struct CapturedOp {
   uint32_t entryPackedParams[kMaxCapturedEntryVisuals] = {};
   uint8_t entryLayerAlpha[kMaxCapturedEntryVisuals] = {};
 
-  // Camera-anchored HUD flag (the bottom-left weapon-selection indicator). True for add_sprite (Sprite)
-  // ops captured while inside a weapon-HUD producer — the icon strip ms_hud_weapon_select_draw_icon_strip
+  // Camera-anchored HUD flag (the bottom-left weapon-selection indicator). True for ResolvedSprite ops
+  // captured while inside a weapon-HUD producer — the icon strip ms_hud_weapon_select_draw_icon_strip
   // (0x82228B18, caps 139/141 + weapon icons) or the slot-range selection draw
   // ms_hud_weapon_slot_range_update_draw (0x82229BA8) — see g_in_weapon_hud_producer. Both pass
-  // xoff = cameraX + const, yoff = cameraY + const, so inside add_sprite (screenX = poseCurX - cameraX +
-  // xoff) the camera CANCELS and the indicator is screen-fixed — but only when add_sprite re-subtracts
-  // the SAME camera the producer baked into xoff. On the off-pass it would not (the camera is shifted for
-  // issue #5 AND a tick ahead, since we replay the previous tick's ops), leaving a residual that slides
-  // the indicator. hudFixed ops are replayed verbatim (no pose lerp) with the op's CAPTURED camera
-  // (hudCamX/Y) restored around the emit, so the cancellation reproduces exactly as on the real frame and
-  // the HUD stays put. See msxx_fps_capture_add_sprite and msxx_fps_replay_sprite.
+  // xoff = cameraX + const, yoff = cameraY + const, so the camera is ALREADY cancelled inside the baked
+  // screenX (r5) captured at insert_sprite. hudFixed therefore just forces the screen-space lerp delta to
+  // 0 (replay the baked screen position verbatim) so the indicator stays put. See CaptureResolvedSprite.
   bool hudFixed = false;
 
-  // The int16 camera (high half of 0x82D74750/4754) at the instant this hudFixed op was CAPTURED — i.e.
-  // the exact camera the producer baked into xoff/yoff (xoff = camX + const). The off-pass replays the
-  // PREVIOUS tick's ops, so the live/off-pass camera has already advanced; restoring this captured value
-  // around the emit makes add_sprite's camera subtraction cancel xoff's camera term precisely (else the
-  // indicator slides by the scroll between capture and replay — ~one tick, measured at 3px). hudFixed only.
-  uint16_t hudCamX = 0, hudCamY = 0;
+  // ResolvedSprite ops only. Per-emit SCREEN-space motion delta in px (cur - prev in screen coords), the
+  // motion the off-pass lerps back toward the previous tick. Unlike the producer path (which lerps the pose
+  // and re-runs the transform), the resolved path lerps the already-baked screenX/Y directly by this delta,
+  // so it must be expressed in SCREEN space: screenX = worldX - camX (DX = world cur-prev) but screenY =
+  // camY - worldY (DY = world PREV-cur, i.e. inverted) — see CaptureResolvedSprite. Getting DY's sign wrong
+  // makes vertical motion interpolate backward. hudFixed ops force 0 (camera-anchored -> screen-fixed).
+  int32_t resolvedLerpDX = 0, resolvedLerpDY = 0;
+
+  // ResolvedSprite ops only. A verbatim snapshot of the CALLER-FRAME input window the recompiled
+  // insert_sprite reads back from its caller's stack. The producer stashes ten values there just before
+  // `bl insert_sprite` (recomp.2.cpp:19180-19198: caller_sp + 0x57/0x5F/0x66/0x6E/0x77/0x7F/0x87/0x8E/
+  // 0x97/0x9C), and insert_sprite reloads them on its draw path (0.cpp:38450/38491/38499/38507 + the quad
+  // build at :39000+). They carry, among others:
+  //   +0x97 = [obj+0x2B] ALPHA/gate byte — MUST be nonzero or insert_sprite branches to its epilogue
+  //           (loc_82203124) and inserts NOTHING (the log-303 blank-off-frame bug: Gate F misread that
+  //           early-out as a skippable "cosmetic rescale"). Also packed into the entry alpha (:38612).
+  //   +0x66/+0x6E = [obj+0x20]/[obj+0x22] scale halves — also must be nonzero or it early-outs (:38497/38505).
+  //   +0x9C = obj back-ptr, used ONLY for the mode read [[obj+0x58]+0x0C] (:38508) — a shallow, always-
+  //           mapped static-pool read (NOT the wild [obj+0x38] lwzx that crashed the producer re-run), so
+  //           re-issuing it on a possibly-despawned obj can't fault (worst case a stale mode, still identity).
+  //   the H-FLIP / draw flags (facing direction etc.) live in the +0x77/+0x7F/+0x87/+0x8E slots — capturing
+  //           the WHOLE window (not just alpha/scale/obj) is why the off-pass mirrors correctly.
+  // Snapshotting the entire [kFrameWinLo, kFrameWinLo+kFrameWinLen) byte window (producer-agnostic,
+  // endian-safe byte copy) and writing it back into the replay frame reproduces every flag byte-exactly, so
+  // insert_sprite runs its real draw path. Bytes insert_sprite doesn't read are harmless; the ones it
+  // self-initializes early (its own r3/r9/r10 arg stores at +0x16/0x47/0x4F) sit BELOW this window.
+  bool frameValid = false;
+  static constexpr uint32_t kFrameWinLo = 0x50;   // covers the lowest producer stash (+0x57)
+  static constexpr uint32_t kFrameWinLen = 0x50;  // through +0x9C+4 (the obj u32) = [0x50,0xA0)
+  uint8_t frameWin[kFrameWinLen] = {};
 };
 
 // Double-buffered capture. The producer walk that builds a frame's list runs
@@ -263,6 +238,34 @@ struct CapturedOp {
 // vector was empty at the off-pass -> begin_frame was wiping them post-walk.)
 std::vector<CapturedOp> g_capture_accum;
 std::vector<CapturedOp> g_capture_ready;
+
+// --- "Resolved sprite" off-pass seam (MSXX_60FPS_RESOLVED_SPRITE_REFACTOR_PLAN.md) ----------------
+// The off-pass capture/replay seam lives at the object-free ms_render_list_insert_sprite chokepoint,
+// NOT at the two producers (add_sprite / anim-stream emit_sprite). The producer entry hooks only open
+// the suppression bracket + set g_emit_obj; CaptureResolvedSprite (insert_sprite ENTRY) pushes a
+// Kind::ResolvedSprite op into g_capture_accum, interleaved in call order with the unchanged Entry/Seal
+// ops. Every arg on a ResolvedSprite op is already resolved (record ptr + baked screen XY + ambient
+// submit state), so the replay (msxx_fps_replay_resolved) re-issues insert_sprite directly and never
+// touches volatile object memory: the despawn/reuse crash class (log 293) is gone by construction, and a
+// producer emit the engine internally skipped simply never reaches insert_sprite so it is never captured
+// (the old issue-#3 off-frame skip dissolves). Gates B/C/F all passed (logs 295-297) and the switch was
+// validated on real gameplay (log 301) before the classic producer-replay path was deleted (step 5); the
+// steps-1/2 parallel diagnostic stream is retired, replaced by the compact Gate-F "does the rescale ever
+// MOVE a sprite" tripwire folded into CaptureResolvedSprite.
+//
+// insert_sprite reloads FOUR values from its caller's frame (the producer stashes them just before the
+// `bl`, recomp.2.cpp:19180-19198): the gate/alpha byte caller_sp+0x97 (= [obj+0x2B]), the scale halves
+// +0x66/+0x6E (= [obj+0x20]/[obj+0x22]), and the obj back-ptr +0x9C. If the gate byte OR either scale half
+// is 0 it branches to loc_82203124 — its EPILOGUE — and inserts NOTHING (recomp 0.cpp:38466-38505). The
+// gated block (0.cpp:38470+) is the real draw path; it rereads the obj from +0x9C only to fetch the mode
+// [[obj+0x58]+0x0C] for a rescale that Gate F proved is a 320/240 VALUE identity. Earlier this seam FORCED
+// caller_sp+0x97=0 believing that "skipped a cosmetic rescale" — it actually early-outed the whole draw
+// (blank off-frames, log 303). The replay now WRITES BACK the four captured caller-frame values (op.frame*,
+// see msxx_fps_call_insert_sprite) so insert_sprite runs its real, byte-exact draw path. The tripwire below
+// warns if any scene's rescale would actually reposition — that scene would need the rescale reproduced.
+constexpr uint32_t kRescaleDimX = 0x82DCEA4Cu;  // insert_sprite rescale: screenX divisor-pair (vs 320)
+constexpr uint32_t kRescaleDimY = 0x82DCEA4Eu;  // insert_sprite rescale: screenY divisor-pair (vs 240)
+int g_gatef_warn_budget = 40;  // Gate-F tripwire: budgeted warnings if the rescale ever moves a sprite
 
 // True only while we are re-issuing captured calls, so the capture hooks ignore
 // the calls the replay itself makes (they would otherwise re-append/recurse).
@@ -292,32 +295,10 @@ uint8_t g_replay_entry_visual_idx = 0;
 // fiber); reset defensively at begin_frame.
 bool g_in_weapon_hud_producer = false;
 
-// Live-object set for the CURRENT 30Hz tick — the sorted, de-duplicated list of object pointers
-// that the engine's OWN walk emitted THIS tick (g_capture_accum). Rebuilt at the top of each
-// off-pass replay (see RefreshLiveObjSet) and consulted by the Producer2 crash guard: a captured
-// Producer2 op whose object is NOT in this set despawned between capture (g_capture_ready = the
-// PREVIOUS tick's list) and replay, so re-running emit_sprite on it would read freed/reused object
-// memory and write a wild bucket (the crash). add_sprite (Sprite) ops don't need this — they re-pass
-// a captured constant spriteId and never re-read volatile object memory.
-std::vector<uint32_t> g_live_objs;
-
-// The object whose sprite is currently being emitted, stashed by the add_sprite / emit_sprite capture
-// hooks (capture time) and by the replay wrappers (replay time) so the insert_sprite entry probe can
-// attribute each final baked sprite position to its object. Diagnostic-only (#4 position probe).
+// The object whose sprite is currently being emitted, stashed by the producer capture hooks so the
+// insert_sprite entry hook can read its live pose delta for the ResolvedSprite capture (and for the #4
+// position probe). Set during the REAL walk only; the off-pass replay is object-free.
 uint32_t g_emit_obj = 0;
-
-// --- Issue #3 off-frame-skip regression counter -----------------------------------------------
-// Kept as a verify tool after the #3 fix (the per-emit [animState+0x0e] restore below): skip_EMIT must
-// stay 0. Set true by the ms_render_list_insert_sprite entry hook whenever it is reached inside a
-// producer bracket (capture: g_in_sprite set; replay: g_replaying set). Read at the Producer2 EXIT hook
-// to stamp op.drewReal (= this emit really drew on the engine's walk), and right after each replayed
-// Producer2 emit to detect a skip. The render-frame driver resets the tallies before the replay loop
-// and logs them after (probe-gated, only when skips occur).
-bool g_emit_reached_insert = false;
-size_t g_last_p2_capture_idx = SIZE_MAX;  // accum index of the Producer2 op currently being captured
-int g_p2_rep_drew = 0;            // off-pass: Producer2 ops that drew for real AND re-reached insert
-int g_p2_rep_skipped_guard = 0;   // drewReal but killed by the OUTER liveness/identity/pose guards
-int g_p2_rep_skipped_emit = 0;    // drewReal but the REPLAYED emit_sprite bailed internally (the #3 bug)
 
 // Interpolation phase numerator/denominator: phase = g_pass / g_pass_count (pass 0
 // -> 0.0 = prev tick; pass 1 of 2 -> 0.5 = midpoint). Set by the off-pass driver
@@ -337,7 +318,6 @@ bool FpsInterpEnabled() { return metalslugxx::config().fps_interpolate; }
 bool FpsActive() { return metalslugxx::config().fps_replay_dryrun || FpsInterpEnabled(); }
 
 // --- Diagnostics (temporary, budgeted log counters) ------------------------
-int g_lerp_dbg_remaining = 80;   // per-sprite prev/cur dump (interp localization)
 int g_renderframe_drv_dbg = 40;  // budget for the in-context ms_render_frame off-pass driver
 int g_capture_class_dbg = 30;    // budget: classify captured ops (sprite-with-pose vs nopose vs entry)
 
@@ -606,19 +586,6 @@ bool DisableIdleMovePromptIfConfigured(uint32_t obj, uint32_t beginDelayHandler)
   return true;
 }
 
-// Snapshot the live per-emit pose into a capture op (config #4 fix, see CapturedOp). Called from
-// the producer ENTRY hooks, where the interpreter's transient per-part offset is still applied to
-// the pose ([obj+0x88]->+0x18/+0x1c cur, +0x20/+0x24 prev, 16.16 fixed).
-void CaptureEmitPose(CapturedOp& op, uint32_t obj) {
-  const uint32_t pose = GuestR32(obj + 0x88u);
-  if (!pose) return;
-  op.poseValid = true;
-  op.poseCurX = GuestR32(pose + 0x18u);
-  op.poseCurY = GuestR32(pose + 0x1Cu);
-  op.posePrevX = GuestR32(pose + 0x20u);
-  op.posePrevY = GuestR32(pose + 0x24u);
-}
-
 void CaptureSubmitState(CapturedOp& op) {
   op.submitStateValid = true;
   op.alphaScaleGate = GuestR32(kSubmitAlphaScaleGate);
@@ -627,19 +594,6 @@ void CaptureSubmitState(CapturedOp& op) {
   op.anchorScreenX = static_cast<uint16_t>(GuestR16(kSubmitAnchorScreenX));
   op.anchorObj = GuestR32(kSubmitAnchorObj);
   op.anchorScreenY = static_cast<uint16_t>(GuestR16(kSubmitAnchorScreenY));
-}
-
-void CaptureObjRenderState(CapturedOp& op, uint32_t obj) {
-  if (!obj) return;
-  op.objRenderStateValid = true;
-  op.objRender1e = GuestR8(obj + 0x1Eu);
-  op.objRender1f = GuestR8(obj + 0x1Fu);
-  op.objRender20 = GuestR32(obj + 0x20u);
-  op.objRender24 = GuestR32(obj + 0x24u);
-  op.objRender28 = GuestR32(obj + 0x28u);
-  op.objRender2c = GuestR32(obj + 0x2Cu);
-  op.objRender30 = GuestR32(obj + 0x30u);
-  op.objRender40 = GuestR8(obj + 0x40u);
 }
 
 void CaptureEntryVisualState(CapturedOp& op, uint32_t entry, uint32_t entryCount,
@@ -675,24 +629,83 @@ void ApplyReplayEntryVisualState(PPCRegister& entryCount, PPCRegister& layerAlph
     layerAlpha.u32 = (layerAlpha.u32 & ~0xFFu) | op->entryLayerAlpha[firstIdx];
 }
 
-// Rebuild g_live_objs from g_capture_accum (THIS tick's completed producer walk). Called once at the
-// top of each off-pass replay, with g_replaying already set so the capture hooks can't mutate accum
-// underneath us. Sorted + de-duplicated so the per-op guard is a binary_search.
-void RefreshLiveObjSet() {
-  g_live_objs.clear();
-  for (const CapturedOp& op : g_capture_accum) {
-    if (op.kind == CapturedOp::Kind::Producer2 || op.kind == CapturedOp::Kind::Sprite)
-      g_live_objs.push_back(op.a[0]);
-  }
-  std::sort(g_live_objs.begin(), g_live_objs.end());
-  g_live_objs.erase(std::unique(g_live_objs.begin(), g_live_objs.end()), g_live_objs.end());
+// Gate-F tripwire (resolved off-pass). insert_sprite's forced-flag-0 replay is byte-exact ONLY while the
+// object-dependent rescale is a 320/240 identity no-op (proven in logs 296/297). This re-runs the recomp's
+// mode-3 position math (0.cpp:38538-38565) for the emitting object during the LIVE walk and warns
+// (budgeted) if it would actually MOVE the sprite — meaning that scene set the screen-dim globals to
+// something other than 320/240 and the replay must reproduce the rescale there. g_emit_obj is the live
+// emitting object here so the reads are safe.
+void GateFTripwire(int32_t screenX, int32_t screenY) {
+  if (!g_emit_obj || g_gatef_warn_budget <= 0) return;
+  const uint8_t f2b = GuestR8(g_emit_obj + 0x2Bu);
+  const uint16_t s20 = static_cast<uint16_t>(GuestR16(g_emit_obj + 0x20u));
+  const uint16_t s22 = static_cast<uint16_t>(GuestR16(g_emit_obj + 0x22u));
+  if (!f2b || !s20 || !s22) return;  // rescale block skipped by the game too -> nothing to reproduce
+  const uint32_t o58 = GuestR32(g_emit_obj + 0x58u);
+  if (!o58 || GuestR16(o58 + 0x0Cu) != 3) return;  // only mode 3 rescales the position
+  const int32_t dimX = static_cast<int16_t>(GuestR16(kRescaleDimX));
+  const int32_t dimY = static_cast<int16_t>(GuestR16(kRescaleDimY));
+  const int32_t newX = (screenX - 160) * dimX / 320 + 160;
+  const int32_t newY = (screenY - 120) * dimY / 240 + 120;
+  if (newX == screenX && newY == screenY) return;  // identity (dims=320/240) -> forced-flag-0 is exact
+  --g_gatef_warn_budget;
+  REXLOG_INFO(
+      "fps-resolved: GATE_F TRIPWIRE — rescale MOVES sprite obj={:#010x} dims=({},{}) "
+      "screenXY=({},{})->({},{}); forced-flag-0 replay is NOT byte-exact this scene",
+      g_emit_obj, dimX, dimY, screenX, screenY, newX, newY);
 }
 
-// True if `obj` was emitted by the engine's own walk THIS tick (i.e. still alive). When the live set
-// is empty (e.g. a driver seam where accum hasn't been populated) we can't tell -> treat everything
-// as live so we never regress to a blank off-pass; the nonzero table/pose guard still applies.
-bool ObjIsLiveThisTick(uint32_t obj) {
-  return g_live_objs.empty() || std::binary_search(g_live_objs.begin(), g_live_objs.end(), obj);
+// Capture one resolved insert_sprite op — the off-pass sprite capture (armed by INI FpsInterpolate via
+// FpsActive). Called from the insert_sprite ENTRY hook during the REAL producer walk (g_in_sprite,
+// !g_replaying), where g_emit_obj is the live emitting object — so the ONE object read here (its pose
+// delta) is always safe. r3..r10 are the fully-resolved insert_sprite args; nothing on the op re-derives
+// from volatile object memory on a later tick, so the replay is object-free. Pushes into the capture
+// stream (g_capture_accum), interleaved in call order with Entry/Seal ops, and points
+// g_active_producer_capture_idx at itself so insert_sprite's nested add_entry attaches its baked
+// entry-visual to this op.
+void CaptureResolvedSprite(uint32_t callerSp, uint32_t a3, uint32_t r4, uint32_t r5, uint32_t r6,
+                           uint32_t r7, uint32_t r8, uint32_t r9, uint32_t r10) {
+  CapturedOp op{};
+  op.kind = CapturedOp::Kind::ResolvedSprite;
+  op.a[0] = a3;                                           // sort/layer key (r3)
+  op.a[1] = r4;                                           // resolved cel/frame-record ptr (r4)
+  op.a[2] = r5;                                           // baked screen X (low 16 = int16)
+  op.a[3] = r6;                                           // baked screen Y
+  op.a[4] = r7;                                           // x sub-offset
+  op.a[5] = r8;                                           // y sub-offset
+  op.a[6] = (r9 & 0xFFu) | ((r10 & 0xFFu) << 8);          // flag9 | flag10<<8
+  // Snapshot the caller-frame input window insert_sprite reloads from ITS caller's stack (see frameWin doc
+  // — alpha/scale/obj/flip flags). The probe hook runs at insert_sprite ENTRY, BEFORE its `stwu r1,-1616`
+  // (recomp 0.cpp:38444), so callerSp is the PRODUCER's live frame here — copy the exact bytes insert_sprite
+  // will consume (producer-agnostic, byte-exact). callerSp==0 (no r1) -> leave frameValid false so the
+  // replay falls back to the old force-0 (blank) rather than writing garbage.
+  if (callerSp) {
+    op.frameValid = true;
+    for (uint32_t i = 0; i < CapturedOp::kFrameWinLen; ++i)
+      op.frameWin[i] = GuestR8(callerSp + CapturedOp::kFrameWinLo + i);
+  }
+  op.hudFixed = g_in_weapon_hud_producer;                 // camera-anchored HUD -> screen-fixed (no lerp)
+  // SCREEN-space per-emit motion delta (cur - prev), from the LIVE pose of the emitting object (pose+0x18/
+  // 0x1C = cur X/Y, +0x20/+0x24 = prev X/Y, 16-bit world px in the high half). The camera term cancels in
+  // cur-prev. NOTE the Y INVERSION: the producer bakes screenX = worldX - camX (same sign) but screenY =
+  // camY - worldY (recomp.2.cpp:23576/23578), so the SCREEN Y delta is the NEGATIVE of the world Y delta.
+  // The replay lerps the baked SCREEN position by this delta directly (it does not re-run the producer, so
+  // it can't rely on the producer to re-apply the inversion). X = cur-prev; Y = prev-cur. Getting the Y
+  // sign wrong makes vertical motion (jumps/falls) interpolate BACKWARD (the log-303 stutter). hudFixed
+  // (camera-anchored) ops stay put -> zero delta.
+  if (!op.hudFixed) {
+    const uint32_t pose = g_emit_obj ? GuestR32(g_emit_obj + 0x88u) : 0;
+    if (pose) {
+      op.resolvedLerpDX = (static_cast<int32_t>(GuestR32(pose + 0x18u)) >> 16)
+                        - (static_cast<int32_t>(GuestR32(pose + 0x20u)) >> 16);
+      op.resolvedLerpDY = (static_cast<int32_t>(GuestR32(pose + 0x24u)) >> 16)   // prev - cur (screen Y is
+                        - (static_cast<int32_t>(GuestR32(pose + 0x1Cu)) >> 16);  // inverted vs world Y)
+    }
+  }
+  CaptureSubmitState(op);  // ambient alpha/anchor state insert_sprite reads (its final value at this call)
+  GateFTripwire(static_cast<int16_t>(r5 & 0xFFFFu), static_cast<int16_t>(r6 & 0xFFFFu));
+  g_active_producer_capture_idx = g_capture_accum.size();  // route the nested add_entry's visual to this op
+  g_capture_accum.push_back(op);
 }
 
 }  // namespace
@@ -714,17 +727,16 @@ bool msxx_disable_idle_move_prompt_left(PPCRegister& r3) {
 // recompiled function against the live global render-list manager, so replayed
 // calls rebuild the same list the producers built. Declared at global scope:
 // REX_IMPORT references the recompiled symbols (weak aliases to __imp__*).
-REX_IMPORT(ms_render_list_add_sprite, msxx_fps_replay_add_sprite,
-           void(uint32_t, uint32_t, uint32_t, uint32_t));
-// Second producer (anim-stream sprite interpreter, 0x822389E0). Re-run on the off-pass with the
-// object's pose lerped, exactly like add_sprite. Returns the advanced command ptr (ignored here).
-REX_IMPORT(ms_obj_anim_stream_emit_sprite, msxx_fps_replay_anim_stream_emit,
-           uint32_t(uint32_t, uint32_t, uint32_t));
 REX_IMPORT(ms_render_list_add_entry, msxx_fps_replay_add_entry,
            void(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t));
 REX_IMPORT(ms_render_list_clear, msxx_fps_replay_render_list_clear, void());
 REX_IMPORT(ms_render_list_zero_buckets, msxx_fps_replay_zero_buckets, void());
 REX_IMPORT(ms_render_list_sort_seal_batch, msxx_fps_replay_sort_seal_batch, void(uint32_t));
+// The object-free chokepoint, called DIRECTLY by the resolved-sprite off-pass replay (step 3) with the
+// baked args. NOT via the auto-isolate operator()(args...) form — see msxx_fps_call_insert_sprite for why
+// (it needs a wide isolation frame + a zeroed rescale-gate byte at caller_sp+0x97). r3..r10 (8 args).
+REX_IMPORT(ms_render_list_insert_sprite, msxx_fps_replay_insert_sprite,
+           void(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t));
 
 // The ms_render_frame do_scene trio (setup 320x240 target -> draw+flush -> finish),
 // re-invoked by the off-pass render-frame driver to re-draw the lerped sprite list into
@@ -813,42 +825,28 @@ void msxx_fps_capture_begin_frame() {
 // This is the HIGH-LEVEL producer: it transforms the object's pose to screen and
 // calls ms_render_list_insert_sprite (0x82200170), which funnels into the SAME
 // low-level append ms_render_list_add_entry (0x821FC4E8) that UI/glyphs use
-// (nested bl at 0x82202FF4/0x82203108). We capture the sprite at THIS level (obj
-// + sprite-id + offsets) so the off-pass replay can re-run the transform with a
-// lerped pose. To avoid double-emitting (the 174-log "partial squares"), the
-// nested add_entry calls this sprite makes are SUPPRESSED via g_in_sprite (set
-// here, cleared at the exit hook); only top-level UI add_entry is captured.
+// (nested bl at 0x82202FF4/0x82203108). We don't capture at THIS level any more (the
+// object-free ResolvedSprite op is captured at insert_sprite instead); this hook only
+// opens the suppression bracket (g_in_sprite, cleared at the exit hook) so the nested
+// add_entry calls are attributed to the resolved op rather than captured as standalone
+// UI entries, and records g_emit_obj so CaptureResolvedSprite can read its live pose.
 void msxx_fps_capture_add_sprite(PPCRegister& r3, PPCRegister& r4, PPCRegister& r5,
                                  PPCRegister& r6) {
+  (void)r4;
+  (void)r5;
+  (void)r6;
   if (FpsProbeEnabled() && !g_replaying) {
     if ((++g_probe_add_sprite % 2000u) == 0)
       REXLOG_INFO("fps-probe: add_sprite#{} begin_frame={} add_entry={} tid={:#x}",
                   g_probe_add_sprite, g_probe_begin_frame, g_probe_add_entry, ThisTid());
   }
   if (!FpsActive() || g_replaying) return;
-  g_emit_obj = r3.u32;  // attribute the nested insert_sprite to this object (position probe)
-  g_in_sprite = true;  // suppress the nested add_entry captures until the exit hook
-  CapturedOp op{};
-  op.kind = CapturedOp::Kind::Sprite;
-  op.a[0] = r3.u32;  // obj
-  op.a[1] = r4.u32;  // spriteId (cel) — SNAP, never lerp
-  op.a[2] = r5.u32;  // xoff (caller constant)
-  op.a[3] = r6.u32;  // yoff (caller constant)
-  op.a[4] = GuestR32(r3.u32 + 0x38u);  // sprite-record table [obj+0x38] — object-identity token for the
-                                       // off-pass replay crash guard (see msxx_fps_replay_sprite). Like
-                                       // Producer2, add_sprite indexes this table (by the captured
-                                       // spriteId, recomp lwzx @0x82236CA0); a freed/reused object leaves
-                                       // it null/stale -> wild load. a[4..6] are otherwise Entry-only.
-  op.hudFixed = g_in_weapon_hud_producer;  // weapon-HUD producer -> skip off-pass cam shift
-  if (op.hudFixed) {  // snapshot the camera this op's xoff/yoff baked, for the off-pass restore
-    op.hudCamX = static_cast<uint16_t>(GuestR16(kCameraX));
-    op.hudCamY = static_cast<uint16_t>(GuestR16(kCameraY));
-  }
-  CaptureObjRenderState(op, r3.u32);  // per-object palette/flip/alpha bytes read by the producer
-  CaptureEmitPose(op, r3.u32);  // per-emit pose (config #4 fix)
-  CaptureSubmitState(op);       // per-emit alpha/anchor state read by insert_sprite
-  g_active_producer_capture_idx = g_capture_accum.size();
-  g_capture_accum.push_back(op);
+  g_emit_obj = r3.u32;  // the emitting object — CaptureResolvedSprite reads its live pose delta
+  g_in_sprite = true;   // suppress the nested add_entry captures until the exit hook
+  // The ResolvedSprite op is captured at insert_sprite entry; g_active_producer_capture_idx is pointed at
+  // it there so the nested add_entry attaches its visual to it. A producer that never reaches insert_sprite
+  // (its emit was internally skipped) contributes nothing — the old issue-#3 off-frame skip can't recur.
+  g_active_producer_capture_idx = SIZE_MAX;
 }
 
 // [[midasm_hook]] at ms_render_list_add_sprite's converged EXIT (0x82236D1C, the
@@ -865,9 +863,10 @@ void msxx_fps_capture_add_sprite_end() {
 // converged EXIT 0x82228C94) and the slot-range selection draw (0x82229BA8, ENTRY -> two converged EXITs
 // 0x8222A548 / 0x8222A56C). Both emit the bottom-left weapon-selection indicator via ms_render_list_add_
 // sprite with xoff=cameraX+const, yoff=cameraY+const, so the indicator is screen-fixed. While inside
-// either, captured add_sprite ops are tagged CapturedOp::hudFixed and replayed at the real camera (the
-// off-pass camera shift would otherwise slide them). Gated on !g_replaying (the producers only run in the
-// engine's real walk). A single shared flag covers both — they never nest.
+// either, the ResolvedSprite ops captured at insert_sprite are tagged CapturedOp::hudFixed (the camera is
+// already cancelled in the baked screenX, so the off-pass just skips their screen-space lerp). Gated on
+// !g_replaying (the producers only run in the engine's real walk). A single shared flag covers both —
+// they never nest.
 void msxx_fps_weapon_hud_enter() {
   if (!FpsActive() || g_replaying) return;
   g_in_weapon_hud_producer = true;
@@ -878,34 +877,18 @@ void msxx_fps_weapon_hud_leave() {
 }
 
 // [[midasm_hook]] at ms_obj_anim_stream_emit_sprite (0x822389E0) ENTRY — the SECOND high-level
-// sprite producer. The main animated entities draw through this anim-stream interpreter, so without
-// capturing it they were recorded as low-level Entry ops (top-level add_entry) and replayed verbatim
-// -> never lerped. Capture it exactly like add_sprite: stash (obj, cmdPtr, animState) and open the
-// g_in_sprite suppression bracket so the nested add_entry insert_sprite makes is NOT re-captured as a
-// UI entry (the Producer2 op regenerates it on replay). Closed at the converged exit hook below.
+// sprite producer. The main animated entities draw through this anim-stream interpreter. Like the
+// add_sprite hook, this no longer captures here (the object-free ResolvedSprite op is captured at
+// insert_sprite instead); it only records the emitting object and opens the g_in_sprite suppression
+// bracket so the nested add_entry insert_sprite makes is attributed to the resolved op, not captured as
+// a standalone UI entry. Closed at the converged exit hook below.
 void msxx_fps_capture_anim_stream(PPCRegister& r3, PPCRegister& r4, PPCRegister& r5) {
+  (void)r4;
+  (void)r5;
   if (!FpsActive() || g_replaying) return;
-  g_emit_obj = r3.u32;  // attribute the nested insert_sprite to this object (position probe)
-  g_in_sprite = true;  // suppress the nested add_entry capture until the exit hook
-  CapturedOp op{};
-  op.kind = CapturedOp::Kind::Producer2;
-  op.a[0] = r3.u32;  // obj (poseable entity — [obj+0x88]->pose)
-  op.a[1] = r4.u32;  // command-stream ptr (persistent anim data)
-  op.a[2] = r5.u32;  // anim-stream state
-  op.a[3] = GuestR32(r3.u32 + 0x38u);  // sprite-table base [obj+0x38] — object-identity token for the
-                                       // replay crash guard (see msxx_fps_replay_anim_stream). emit_sprite
-                                       // indexes this table with a byte from the cmd stream; if the obj's
-                                       // address is later reused by a DIFFERENT entity its table base
-                                       // changes, so a mismatch flags a dangling captured cmdPtr.
-  CaptureObjRenderState(op, r3.u32);  // per-object palette/flip/alpha bytes read by the producer
-  CaptureEmitPose(op, r3.u32);  // per-emit pose, incl. the transient per-part offset (config #4 fix)
-  CaptureSubmitState(op);       // per-emit alpha/anchor state read by insert_sprite
-  op.animValid = true;
-  op.animCounter = static_cast<uint16_t>(GuestR16(r5.u32 + 0x0Eu));  // [animState+0x0e] guard #3 input
-  g_last_p2_capture_idx = g_capture_accum.size();  // this op's slot, stamped with drewReal at exit
-  g_active_producer_capture_idx = g_capture_accum.size();
-  g_emit_reached_insert = false;                   // arm the reach flag (set if insert_sprite fires)
-  g_capture_accum.push_back(op);
+  g_emit_obj = r3.u32;  // the emitting object — CaptureResolvedSprite reads its live pose delta
+  g_in_sprite = true;   // suppress the nested add_entry capture until the exit hook
+  g_active_producer_capture_idx = SIZE_MAX;  // pointed at the resolved op when insert_sprite fires
 }
 
 // [[midasm_hook]] at ms_obj_anim_stream_emit_sprite's converged EXIT (0x82238C10, the `mr r3,r22`
@@ -914,11 +897,6 @@ void msxx_fps_capture_anim_stream(PPCRegister& r3, PPCRegister& r4, PPCRegister&
 void msxx_fps_capture_anim_stream_end() {
   if (!FpsActive() || g_replaying) return;
   g_in_sprite = false;
-  // Record whether this emit actually drew (reached insert_sprite past its four internal guards)
-  // during the real walk, so the off-pass can detect when the replay skips it (issue #3 confirm).
-  if (g_last_p2_capture_idx < g_capture_accum.size())
-    g_capture_accum[g_last_p2_capture_idx].drewReal = g_emit_reached_insert;
-  g_last_p2_capture_idx = SIZE_MAX;
   g_active_producer_capture_idx = SIZE_MAX;
 }
 
@@ -976,53 +954,6 @@ struct SubmitStateSave {
   uint16_t anchorScreenY = 0;
 };
 
-struct ObjRenderStateSave {
-  bool active = false;
-  uint32_t obj = 0;
-  uint8_t objRender1e = 0, objRender1f = 0;
-  uint32_t objRender20 = 0, objRender24 = 0, objRender28 = 0, objRender2c = 0, objRender30 = 0;
-  uint8_t objRender40 = 0;
-};
-
-static ObjRenderStateSave ApplyCapturedObjRenderState(const CapturedOp& op) {
-  if (!op.objRenderStateValid || !op.a[0]) return {};
-  const uint32_t obj = op.a[0];
-  ObjRenderStateSave save;
-  save.active = true;
-  save.obj = obj;
-  save.objRender1e = GuestR8(obj + 0x1Eu);
-  save.objRender1f = GuestR8(obj + 0x1Fu);
-  save.objRender20 = GuestR32(obj + 0x20u);
-  save.objRender24 = GuestR32(obj + 0x24u);
-  save.objRender28 = GuestR32(obj + 0x28u);
-  save.objRender2c = GuestR32(obj + 0x2Cu);
-  save.objRender30 = GuestR32(obj + 0x30u);
-  save.objRender40 = GuestR8(obj + 0x40u);
-
-  GuestW8(obj + 0x1Eu, op.objRender1e);
-  GuestW8(obj + 0x1Fu, op.objRender1f);
-  GuestW32(obj + 0x20u, op.objRender20);
-  GuestW32(obj + 0x24u, op.objRender24);
-  GuestW32(obj + 0x28u, op.objRender28);
-  GuestW32(obj + 0x2Cu, op.objRender2c);
-  GuestW32(obj + 0x30u, op.objRender30);
-  GuestW8(obj + 0x40u, op.objRender40);
-  return save;
-}
-
-static void RestoreObjRenderState(const ObjRenderStateSave& save) {
-  if (!save.active) return;
-  const uint32_t obj = save.obj;
-  GuestW8(obj + 0x1Eu, save.objRender1e);
-  GuestW8(obj + 0x1Fu, save.objRender1f);
-  GuestW32(obj + 0x20u, save.objRender20);
-  GuestW32(obj + 0x24u, save.objRender24);
-  GuestW32(obj + 0x28u, save.objRender28);
-  GuestW32(obj + 0x2Cu, save.objRender2c);
-  GuestW32(obj + 0x30u, save.objRender30);
-  GuestW8(obj + 0x40u, save.objRender40);
-}
-
 static SubmitStateSave ApplyCapturedSubmitState(const CapturedOp& op) {
   if (!op.submitStateValid) return {};
   SubmitStateSave save;
@@ -1064,209 +995,104 @@ static void msxx_fps_replay_with_entry_visual_state(const CapturedOp& op, EmitFn
   g_replay_entry_visual_idx = prevIdx;
 }
 
+// Apply the op's captured ambient submit state + route its nested add_entry visuals, run the emit, then
+// restore. Resolved ops don't touch object memory, so there is no obj-render-state save/restore here.
 template <typename EmitFn>
 static void msxx_fps_replay_with_captured_state(const CapturedOp& op, EmitFn&& emit) {
-  const ObjRenderStateSave objSave = ApplyCapturedObjRenderState(op);
   const SubmitStateSave save = ApplyCapturedSubmitState(op);
   msxx_fps_replay_with_entry_visual_state(op, emit);
   RestoreSubmitState(save);
-  RestoreObjRenderState(objSave);
 }
 
-// Replay one captured producer call through the native transform, driving the emit from the pose
-// SNAPSHOT taken at THIS producer call (op.poseCur*/posePrev*, config #4 fix) rather than the live
-// pose. This is the fix for the player torso/legs collapse (log 239): a multi-part object shares one
-// pose+one object, and the anim-stream interpreter applies a transient per-part offset to pose+0x1c
-// AROUND each emit (legs 244, torso 269) then reverts it. The off-pass cannot reproduce those
-// between-emit interpreter writes, so reading the live pose makes BOTH emits see the single resting
-// value (244) and collapse. Instead we ALWAYS write the captured per-emit pose into the live pose
-// before re-running that emit, then restore -> each part lands where it really did.
-//
-// On top of that, when interpolation is active and phase>0 we blend the captured endpoints
-// (prev = posePrev*, cur = poseCur*, both 16.16) to the inter-tick point (phase = pass/pass_count)
-// instead of writing the captured-cur verbatim. The off-pass driver runs at g_pass=1/g_pass_count=2
-// (the midpoint); the real present (pass 0) is left verbatim.
-//
-// Shared by both high-level producers (identical pose layout [obj+0x88]->+0x18/0x1c cur, +0x20/0x24
-// prev): ms_render_list_add_sprite (HUD/effects) and the anim-stream emit_sprite (player/enemies/
-// projectiles). Ops with no captured pose (op.poseValid == false, e.g. [obj+0x88]==0) replay verbatim.
-template <typename EmitFn>
-static void msxx_fps_replay_with_lerp(uint32_t obj, const CapturedOp& op, EmitFn&& emit) {
-  const uint32_t pose = op.poseValid ? GuestR32(obj + 0x88u) : 0;
-  if (!pose) {  // nothing captured / no pose -> re-issue at the live pose
-    msxx_fps_replay_with_captured_state(op, emit);
-    return;
+// Call ms_render_list_insert_sprite DIRECTLY for the resolved off-pass replay. The recompiled
+// insert_sprite reloads FOUR values from its caller's stack that the producer stashed just before the
+// `bl` (recomp 0.cpp:38450/38491/38499/38507 read caller_sp+0x97/+0x66/+0x6E/+0x9C): the alpha/gate byte,
+// the two scale halves, and the obj back-ptr. If the gate byte OR either scale half is 0, insert_sprite
+// branches straight to its epilogue (loc_82203124) and inserts NOTHING — the log-303 blank-off-frame bug
+// (Gate F misread that early-out as a skippable "cosmetic rescale"; it is actually the whole draw path's
+// guard). The auto-isolate call form (r1-=0x70) leaves those slots in the PARENT frame; instead build a
+// WIDE isolation frame (r1-=0x120, so the slots land in our own scratch, clear of the parent's locals) and
+// WRITE BACK the values captured verbatim from the producer's frame at capture time (op.frame*). Gate F
+// proved the resulting rescale is a 320/240 value identity, so reproducing it is byte-exact; the only obj
+// touch is the shallow, always-mapped [obj+0x58] mode read (not the wild [obj+0x38] lwzx that crashed the
+// producer re-run). If the op has no captured frame (frameValid==false, e.g. a run without the widened
+// hook), fall back to force-0 (the sprite won't draw, but nothing is corrupted).
+void msxx_fps_call_insert_sprite(const CapturedOp& op, uint32_t a3, uint32_t record, uint32_t screenX,
+                                 uint32_t screenY, uint32_t sub7, uint32_t sub8, uint32_t flag9,
+                                 uint32_t flag10) {
+  auto* ts = rex::runtime::ThreadState::Get();
+  auto* ks = rex::system::kernel_state();
+  if (!ts || !ts->context() || !ks || !ks->memory()) return;
+  PPCContext* parentCtx = ts->context();
+  uint8_t* base = ks->memory()->virtual_membase();
+
+  PPCContext ctx{};
+  ctx.r1 = parentCtx->r1;
+  ctx.r1.u32 -= 0x120;  // wide frame: caller_sp+0x66/+0x6E/+0x97/+0x9C land in our scratch, not the parent's
+  ctx.r13 = parentCtx->r13;
+  ctx.fpscr = parentCtx->fpscr;
+  if (op.frameValid) {
+    // Reproduce the producer's caller-frame stash verbatim (alpha/scale/obj/flip) so insert_sprite runs its
+    // real draw path with the correct facing direction and flags.
+    for (uint32_t i = 0; i < CapturedOp::kFrameWinLen; ++i)
+      GuestW8(ctx.r1.u32 + CapturedOp::kFrameWinLo + i, op.frameWin[i]);
+  } else {
+    GuestW8(ctx.r1.u32 + 0x97u, 0);  // no captured frame -> skip the block (draws nothing, safe)
   }
 
-  const int32_t curX = static_cast<int32_t>(op.poseCurX);
-  const int32_t curY = static_cast<int32_t>(op.poseCurY);
-  const int32_t prevX = static_cast<int32_t>(op.posePrevX);
-  const int32_t prevY = static_cast<int32_t>(op.posePrevY);
-
-  // What we write into the live pose for THIS emit: the captured CURRENT per-emit pose by default;
-  // the inter-tick blend when interpolation is active and the part actually moved.
-  int32_t wx = curX, wy = curY;
-
-  // DIAGNOSTIC (env MSXX_FPS_DEBUG_SHIFT=N): on the off-pass, shift EVERY sprite by N px in X. If the
-  // screen then shows alternating shifted/normal frames, the off-pass force-render reaches the display
-  // (so a "still 30fps" result is a lerp/pose problem); if it stays identical, the off-pass is not
-  // being presented. Cached once.
-  static const int dbg_shift = [] {
-    const char* s = std::getenv("MSXX_FPS_DEBUG_SHIFT");
-    return s ? std::atoi(s) : 0;
-  }();
-
-  const bool lerp = FpsInterpEnabled() && g_pass_count > 0 && g_pass > 0;
-  if (dbg_shift != 0) {
-    wx = curX + (dbg_shift << 16);
-  } else if (lerp) {
-    // Snap (no lerp) on a teleport / pose-commit bypass: if the per-tick move exceeds ~48 px the prev
-    // endpoint is a scene cut or a stale value -> lerping it would streak. High half of 16.16 == px.
-    const int32_t dXpx = (curX >> 16) - (prevX >> 16);
-    const int32_t dYpx = (curY >> 16) - (prevY >> 16);
-    const bool snap = dXpx > 48 || dXpx < -48 || dYpx > 48 || dYpx < -48;
-    if (g_lerp_dbg_remaining > 0) {
-      --g_lerp_dbg_remaining;
-      REXLOG_INFO(
-          "fps-lerp: obj={:#010x} pose={:#010x} curXY=({},{}) prevXY=({},{}) "
-          "dpx=({},{}) snap={} phase={}/{}",
-          obj, pose, curX >> 16, curY >> 16, prevX >> 16, prevY >> 16, dXpx, dYpx, snap,
-          g_pass, g_pass_count);
-    }
-    if (!snap && (curX != prevX || curY != prevY)) {
-      const int64_t n = static_cast<int64_t>(g_pass);
-      const int64_t d = static_cast<int64_t>(g_pass_count);
-      wx = prevX + static_cast<int32_t>((static_cast<int64_t>(curX - prevX) * n) / d);
-      wy = prevY + static_cast<int32_t>((static_cast<int64_t>(curY - prevY) * n) / d);
-    }
-  }
-
-  const uint32_t saveX = GuestR32(pose + 0x18u);
-  const uint32_t saveY = GuestR32(pose + 0x1Cu);
-  GuestW32(pose + 0x18u, static_cast<uint32_t>(wx));
-  GuestW32(pose + 0x1Cu, static_cast<uint32_t>(wy));
-  msxx_fps_replay_with_captured_state(op, emit);
-  GuestW32(pose + 0x18u, saveX);  // restore: 30Hz sim untouched
-  GuestW32(pose + 0x1Cu, saveY);
+  msxx_fps_replay_insert_sprite(ctx, base, a3, record, screenX, screenY, sub7, sub8, flag9, flag10);
+  parentCtx->fpscr = ctx.fpscr;
 }
 
-// Producer #1: ms_render_list_add_sprite (HUD weapon, smoke, other add_sprite emitters).
-void msxx_fps_replay_sprite(const CapturedOp& op) {
-  const uint32_t obj = op.a[0];
+// Replay one resolved-sprite op (step 3). Object-free: re-issues the baked insert_sprite args at the
+// inter-tick midpoint. screenX/Y are lerped back toward the previous tick by the captured pose delta
+// (resolvedLerpDX/DY) and reprojected onto the off-pass midpoint camera, then insert_sprite is called
+// directly. No liveness/identity/pose guard, no obj-render/pose-rewrite dance — the whole despawn/reuse
+// crash class is gone by construction (plan §3/§9).
+void msxx_fps_replay_resolved(const CapturedOp& op) {
+  int32_t sx = static_cast<int16_t>(op.a[2] & 0xFFFFu);
+  int32_t sy = static_cast<int16_t>(op.a[3] & 0xFFFFu);
 
-  // CRASH GUARD (dropped-weapon pickup, log 293). Like Producer2, add_sprite recomputes the sprite
-  // record from VOLATILE object memory: it reads the sprite-record table [obj+0x38] and indexes it by
-  // the captured spriteId (recomp lwzx @0x82236CA0). We replay g_capture_ready (the PREVIOUS tick's
-  // list) one tick after capture; an entity that despawned in between — a weapon dropped on the ground
-  // then picked back up — has had [obj+0x38] freed/reused, so re-running bakes a wild table index into
-  // insert_sprite -> access violation (log 293: read of 0x1_0000021C = guest base + near-null, i.e.
-  // [obj+0x38] had gone null). The same two gates producer #2 uses fix it:
-  //   (1) liveness — obj must ALSO be in THIS tick's live set (else it despawned -> skip; a gone entity
-  //       correctly should not draw on the off-pass).
-  //   (2) identity — [obj+0x38] must still equal the captured table base (a[4]); a mismatch means the
-  //       address was recycled for a DIFFERENT entity (passes (1)) whose foreign/short table the captured
-  //       spriteId would index out of range -> wild load.
-  // No pose guard here (unlike producer #2): add_sprite legitimately draws pose-less HUD/UI sprites, and
-  // msxx_fps_replay_with_lerp already replays poseValid==false verbatim.
-  if (!ObjIsLiveThisTick(obj)) return;
-  const uint32_t table = GuestR32(obj + 0x38u);
-  if (!table || table != op.a[4]) return;
-
-  g_emit_obj = obj;  // attribute the off-pass insert_sprite to this object (position probe)
-
-  // Camera-anchored HUD indicator (weapon-select strip, op.hudFixed): the producer baked xoff = camX +
-  // const / yoff = camY + const, so inside add_sprite (screenX = poseX - camX + xoff) the camera cancels
-  // and the indicator is screen-fixed. To reproduce that cancellation on the off-pass, add_sprite must
-  // re-subtract the SAME camera the op's xoff baked. We replay the PREVIOUS tick's ops, and the off-pass
-  // camera is shifted (issue #5) AND a tick ahead, so neither the live nor the midpoint camera matches —
-  // either leaves a residual = the scroll since capture (~3px/tick while scrolling, the observed jitter).
-  // Restore the op's OWN captured camera (op.hudCamX/Y) around the emit so the camera term cancels exactly
-  // as on the real frame; emit verbatim (the element is fixed — no pose lerp). Independent of g_cam_applied.
-  if (op.hudFixed) {
-    const uint16_t sx = static_cast<uint16_t>(GuestR16(kCameraX));
-    const uint16_t sy = static_cast<uint16_t>(GuestR16(kCameraY));
-    GuestW16(kCameraX, op.hudCamX);
-    GuestW16(kCameraY, op.hudCamY);
-    msxx_fps_replay_with_captured_state(op, [&] {
-      msxx_fps_replay_add_sprite(op.a[0], op.a[1], op.a[2], op.a[3]);
-    });
-    GuestW16(kCameraX, sx);
-    GuestW16(kCameraY, sy);
-    return;
+  if (!op.hudFixed && FpsInterpEnabled() && g_pass_count > 0 && g_pass > 0) {
+    const int32_t dX = op.resolvedLerpDX;
+    const int32_t dY = op.resolvedLerpDY;
+    // Snap (draw at cur, no lerp) on a teleport / scene cut — same ±48 px threshold the producer path uses.
+    const bool snap = dX > 48 || dX < -48 || dY > 48 || dY < -48;
+    if (!snap) {
+      // remaining fraction toward prev = (pass_count - pass)/pass_count (pass 1/2 -> half a tick back).
+      const int64_t rem = static_cast<int64_t>(g_pass_count - g_pass);
+      sx -= static_cast<int32_t>((static_cast<int64_t>(dX) * rem) / g_pass_count);
+      sy -= static_cast<int32_t>((static_cast<int64_t>(dY) * rem) / g_pass_count);
+      // Camera term (issue #5): the baked screen pos has cam_cur baked in, but the off-pass camera is set
+      // to cam_mid, so reproject onto cam_mid so resolved sprites track the lerped backdrop. The producer
+      // re-run gets this implicitly by projecting the lerped pose through the mid camera; here the screen
+      // pos is pre-baked so we add it explicitly. Skipped if the camera snapped (cam_mid == cam_cur -> 0).
+      // Same Y inversion as the pose delta: screenX = worldX - camX so +(cam_cur - cam_mid), but screenY =
+      // camY - worldY so the Y term is the NEGATIVE, +(cam_mid - cam_cur).
+      if (g_cam_applied) {
+        sx += g_cam_save_x - static_cast<int32_t>(GuestR16(kCameraX));
+        sy += static_cast<int32_t>(GuestR16(kCameraY)) - g_cam_save_y;
+      }
+    }
   }
 
-  msxx_fps_replay_with_lerp(op.a[0], op, [&] {
-    msxx_fps_replay_add_sprite(op.a[0], op.a[1], op.a[2], op.a[3]);
+  const uint32_t rx = (op.a[2] & 0xFFFF0000u) | static_cast<uint16_t>(sx);
+  const uint32_t ry = (op.a[3] & 0xFFFF0000u) | static_cast<uint16_t>(sy);
+  const uint32_t flag9 = op.a[6] & 0xFFu;
+  const uint32_t flag10 = (op.a[6] >> 8) & 0xFFu;
+
+  // Apply the captured submit state + route the nested add_entry's visuals to this op.
+  msxx_fps_replay_with_captured_state(op, [&] {
+    msxx_fps_call_insert_sprite(op, op.a[0], op.a[1], rx, ry, op.a[4], op.a[5], flag9, flag10);
   });
 }
 
-// Producer #2: ms_obj_anim_stream_emit_sprite (the player/enemies/projectiles). Same pose lerp; the
-// command-stream / anim-state args are re-passed verbatim (persistent data, idempotent re-run).
-//
-// CRASH GUARD (plan issues #1 + #3). Unlike add_sprite, this producer recomputes the sprite record
-// from VOLATILE object memory: it reads the sprite table [obj+0x38], indexes a record out of it, and
-// hands that to insert_sprite. We replay g_capture_ready (the PREVIOUS tick's list) one tick after
-// capture; an entity that despawned in between has had [obj+0x38] freed/reused, so the re-run bakes a
-// garbage record into a wild render-list bucket -> access violation (~0x83274E70 in the log-229 crash).
-// Two cheap, robust gates before re-emitting:
-//   (1) liveness — the object must also have been emitted by the engine's OWN walk THIS tick
-//       (present in g_live_objs); if it's gone, skip it (the milder "off-pass skip" branch, #3, is
-//       correct: a despawned entity should not appear). Catches freed-and-NOT-reused (despawn).
-//   (2) identity — [obj+0x38] (the sprite-record table emit_sprite indexes) must still equal the value
-//       captured for this op. This is the key gate for the freed-AND-reused case (log 230 crash): when
-//       the object's address is recycled for a DIFFERENT entity it still appears in g_live_objs (so (1)
-//       passes), but its table base changes. Re-running emit_sprite then pairs the captured (now
-//       dangling) cmdPtr's index byte with the new entity's table -> lwzx loads a wild record ptr ->
-//       insert_sprite writes a wild bucket (the AV). A table-base match means it's the same entity, just
-//       a tick further into its (persistent) anim stream, so the captured cmdPtr is still in-range.
-//   (3) pose — [obj+0x88] must be nonzero; nothing to lerp/emit otherwise.
-// add_sprite (Sprite) ops need none of these — they re-pass a captured constant spriteId, no re-read.
-void msxx_fps_replay_anim_stream(const CapturedOp& op) {
-  const uint32_t obj = op.a[0];
-  if (!ObjIsLiveThisTick(obj)) {                  // despawned since capture -> skip (no wild write)
-    if (op.drewReal) ++g_p2_rep_skipped_guard;
-    return;
-  }
-  const uint32_t table = GuestR32(obj + 0x38u);   // sprite-record table emit_sprite indexes with the cmd
-  if (!table || table != op.a[3]) {               // freed/zeroed or address reused (different entity) -> skip
-    if (op.drewReal) ++g_p2_rep_skipped_guard;
-    return;
-  }
-  if (!GuestR32(obj + 0x88u)) {                   // no pose -> nothing safe to lerp/emit
-    if (op.drewReal) ++g_p2_rep_skipped_guard;
-    return;
-  }
-
-  g_emit_obj = obj;  // attribute the off-pass insert_sprite to this object (position probe)
-
-  // Issue #3 FIX: restore the per-emit [animState+0x0e] this emit saw at capture so emit_sprite's
-  // guard #3 ([animState+0x0e] high byte >= 128 -> skip) reproduces the real-walk draw decision
-  // instead of testing the advanced live counter. Restore after (the 30Hz sim is untouched).
-  const uint32_t animAddr = op.a[2] + 0x0Eu;
-  const uint16_t animSave = op.animValid ? static_cast<uint16_t>(GuestR16(animAddr)) : 0;
-  if (op.animValid) GuestW16(animAddr, op.animCounter);
-
-  g_emit_reached_insert = false;  // re-armed per op; set by the insert_sprite hook if the emit draws
-  msxx_fps_replay_with_lerp(obj, op, [&] {
-    msxx_fps_replay_anim_stream_emit(op.a[0], op.a[1], op.a[2]);
-  });
-  if (op.animValid) GuestW16(animAddr, animSave);
-  // Regression check: this op drew on the real walk; the replayed emit must draw again (skip_EMIT==0).
-  if (op.drewReal) {
-    if (g_emit_reached_insert) ++g_p2_rep_drew;
-    else ++g_p2_rep_skipped_emit;  // would be the #3 skip resurfacing
-  }
-}
-
-// Dispatch one captured op to the right replay path. Single point of truth for the three off-pass
-// driver loops (pass-loop, upscale, render-frame) so a new op kind is handled everywhere at once.
+// Dispatch one captured op to the right replay path. Single point of truth for the off-pass driver so a
+// new op kind is handled everywhere at once.
 void msxx_fps_replay_op(const CapturedOp& op) {
   switch (op.kind) {
-    case CapturedOp::Kind::Sprite:
-      msxx_fps_replay_sprite(op);
-      break;
-    case CapturedOp::Kind::Producer2:
-      msxx_fps_replay_anim_stream(op);
+    case CapturedOp::Kind::ResolvedSprite:
+      msxx_fps_replay_resolved(op);
       break;
     case CapturedOp::Kind::Entry:
       msxx_fps_replay_with_entry_visual_state(op, [&] {
@@ -1384,39 +1210,17 @@ void msxx_fps_render_frame_driver(PPCRegister& do_scene_saved) {
   // present #0 source redirect in msxx_fps_redirect_scene_source).
   EnsureBufferBTexture();
 
-  // DIAGNOSTIC (budgeted): classify the captured list so we know which sprites can lerp. The
-  // pose-lerp path fires for Sprite AND Producer2 ops whose [obj+0x88] pose is nonzero; Entry ops and
-  // pose==0 producers are replayed verbatim. Before producer-2 capture the player/enemy/projectile
-  // entities showed up only as `entry` (verbatim, no lerp); now they should appear as `prod2_pose`,
-  // which confirms step 4a hooked the right producer and that `entry` drops to genuine UI/glyphs.
+  // DIAGNOSTIC (budgeted): classify the captured list by op kind. The interpolated draws are the
+  // ResolvedSprite ops (object-free, lerped via the baked screenX/Y delta); Entry/Seal replay verbatim.
   if (FpsProbeEnabled() && (++g_capture_class_dbg % 60) == 0) {
-    size_t sp_pose = 0, sp_nopose = 0, p2_pose = 0, p2_nopose = 0, ent = 0;
-    uint32_t nopose_obj[4] = {0, 0, 0, 0};
-    int ns = 0;
+    size_t resolved = 0, ent = 0, seal = 0;
     for (const CapturedOp& op : g_capture_ready) {
-      if (op.kind == CapturedOp::Kind::Sprite) {
-        if (GuestR32(op.a[0] + 0x88u)) {
-          ++sp_pose;
-        } else {
-          ++sp_nopose;
-          if (ns < 4) nopose_obj[ns++] = op.a[0];
-        }
-      } else if (op.kind == CapturedOp::Kind::Producer2) {
-        if (GuestR32(op.a[0] + 0x88u)) {
-          ++p2_pose;
-        } else {
-          ++p2_nopose;
-          if (ns < 4) nopose_obj[ns++] = op.a[0];
-        }
-      } else if (op.kind == CapturedOp::Kind::Entry) {
-        ++ent;
-      }
+      if (op.kind == CapturedOp::Kind::ResolvedSprite) ++resolved;
+      else if (op.kind == CapturedOp::Kind::Entry) ++ent;
+      else if (op.kind == CapturedOp::Kind::Seal) ++seal;
     }
-    REXLOG_INFO(
-        "fps-capclass: total={} sprite_pose={} sprite_nopose={} prod2_pose={} prod2_nopose={} "
-        "entry={} nopose_objs={:#x},{:#x},{:#x},{:#x}",
-        g_capture_ready.size(), sp_pose, sp_nopose, p2_pose, p2_nopose, ent, nopose_obj[0],
-        nopose_obj[1], nopose_obj[2], nopose_obj[3]);
+    REXLOG_INFO("fps-capclass: total={} resolved={} entry={} seal={}",
+                g_capture_ready.size(), resolved, ent, seal);
   }
 
   // Off-pass phase = midpoint (0.5): prev = pose+0x20/0x24 (tick start), cur = pose+0x18/0x1c.
@@ -1427,7 +1231,6 @@ void msxx_fps_render_frame_driver(PPCRegister& do_scene_saved) {
   // Rebuild the captured displayed-frame list, lerped. Native makes a list flushable by sealing
   // pending batches and then running zero_buckets; doing zero_buckets before replay is a no-op after
   // clear() and leaves stale bucket/order state in the synthetic frame.
-  g_p2_rep_drew = g_p2_rep_skipped_guard = g_p2_rep_skipped_emit = 0;  // issue #3 confirm tallies
 
   // Issue #5 sync: set the int16 camera to the inter-tick midpoint so the off-pass sprites project with
   // the same camera the lerped backdrop uses (else sprites stay at camera_N while the backdrop is at
@@ -1465,24 +1268,11 @@ void msxx_fps_render_frame_driver(PPCRegister& do_scene_saved) {
   }
 
   g_replaying = true;
-  RefreshLiveObjSet();  // snapshot this tick's live objects for the Producer2 crash guard
   msxx_fps_replay_render_list_clear();
   for (const CapturedOp& op : g_capture_ready)
     msxx_fps_replay_op(op);
   msxx_fps_replay_sort_seal_batch(0);
   msxx_fps_replay_zero_buckets();
-
-  // Issue #3 regression check: Producer2 ops that DREW on the real walk but were skipped on replay.
-  // After the per-emit [animState+0x0e] restore, skip_EMIT must stay 0; skip_guard counts legitimate
-  // despawn/reuse drops. Logged only when there ARE skips, budgeted, probe-gated.
-  if (FpsProbeEnabled() && (g_p2_rep_skipped_emit || g_p2_rep_skipped_guard)) {
-    static int s_skip_log = 200;
-    if (s_skip_log > 0) {
-      --s_skip_log;
-      REXLOG_INFO("fps-skip off-pass: p2 drew_ok={} skip_guard={} skip_EMIT={} (skip_EMIT must be 0)",
-                  g_p2_rep_drew, g_p2_rep_skipped_guard, g_p2_rep_skipped_emit);
-    }
-  }
 
   // Re-bind the 320x240 scene RT (the linchpin: in-context this binds the correct tile) and draw
   // the lerped list into the hot scene EDRAM. setup clears+binds; scene_render draws border +
@@ -1559,11 +1349,16 @@ void msxx_fps_redirect_scene_source(PPCRegister& r5) {
 // #4 position PROBE (MSXX_FPS_ISPROBE=1, verify tool) — logs the final baked screen pos + pose curY/prevY
 // at CAPTURE (engine walk) vs REPLAY (off-pass) so the player's per-part positions can be compared. This
 // is what proved the torso/legs collapse and then confirmed the per-emit pose-capture fix. Read-only.
-void msxx_fps_probe_insert_sprite(PPCRegister& r4, PPCRegister& r5, PPCRegister& r6, PPCRegister& r7,
-                                  PPCRegister& r8) {
-  // Issue #3 confirm: a producer emit (capture: g_in_sprite; replay: g_replaying) reached the draw
-  // chokepoint. The producer hooks consume + reset this flag, so it reflects exactly this emit.
-  if (FpsActive() && (g_replaying || g_in_sprite)) g_emit_reached_insert = true;
+void msxx_fps_probe_insert_sprite(PPCRegister& r3, PPCRegister& r4, PPCRegister& r5, PPCRegister& r6,
+                                  PPCRegister& r7, PPCRegister& r8, PPCRegister& r9, PPCRegister& r10,
+                                  PPCRegister& r1) {
+  // Resolved-sprite capture: record the fully-resolved insert_sprite args from the REAL producer walk.
+  // Gated on g_in_sprite so only producer-driven emits are captured (any unrelated caller of
+  // insert_sprite is skipped, matching risk E); never during replay (that would double-capture). r1 is the
+  // caller's stack ptr (this hook runs BEFORE insert_sprite's own `stwu`), so CaptureResolvedSprite reads
+  // the four caller-frame slots insert_sprite will reload (alpha/scale/obj) straight from the producer frame.
+  if (FpsActive() && g_in_sprite && !g_replaying)
+    CaptureResolvedSprite(r1.u32, r3.u32, r4.u32, r5.u32, r6.u32, r7.u32, r8.u32, r9.u32, r10.u32);
   if (!FpsIsProbeEnabled()) return;
   const int16_t raw_sy = static_cast<int16_t>(r6.u32 & 0xFFFF);  // producer's baked screenY
   const bool rep = g_replaying;

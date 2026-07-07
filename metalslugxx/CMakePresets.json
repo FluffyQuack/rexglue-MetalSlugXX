@@ -37,8 +37,8 @@
             "hidden": true,
             "inherits": "windows-base",
             "cacheVariables": {
-                "CMAKE_C_FLAGS": "-march=x86-64-v3",
-                "CMAKE_CXX_FLAGS": "-march=x86-64-v3"
+                "CMAKE_C_FLAGS": "-march=x86-64-v2",
+                "CMAKE_CXX_FLAGS": "-march=x86-64-v2"
             }
         },
         {

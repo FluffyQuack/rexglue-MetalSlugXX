@@ -201,12 +201,12 @@
 "0x82251B90" = { }
 "0x82252858" = { }
 "0x82252908" = { }
-"0x82253228" = { }
+"0x82253228" = { name = "ms_enemy_state_check_player_side_hit" }
 "0x82253338" = { }
 "0x82253490" = { }
 "0x82253550" = { }
-"0x82253BD0" = { }
-"0x82253D10" = { }
+"0x82253BD0" = { name = "ms_enemy_state_poll_player_side_hit_branches" }
+"0x82253D10" = { name = "ms_enemy_state_track_target_poll_player_side_hits" }
 "0x82253E98" = { }
 "0x822545E0" = { }
 "0x822546B8" = { }
@@ -247,7 +247,7 @@
 "0x8225A8E0" = { }
 "0x8225AAC0" = { }
 "0x8225AB80" = { }
-"0x8225AF20" = { }
+"0x8225AF20" = { name = "ms_player_arcing_projectile_update" }
 "0x8225BBB8" = { }
 "0x8225BC78" = { }
 "0x8225BCF8" = { }
@@ -375,7 +375,7 @@
 "0x82279910" = { }
 "0x82279D10" = { name = "ms_player_state_body_anim_gravity_tail" } # callback/state handler; runs the player body anim stream then common player tail
 "0x82279FF0" = { name = "ms_player_body_part_child_anim_handler" } # torso/legs child-node handler; validates parent and advances its anim stream
-"0x8227A798" = { }
+"0x8227A798" = { name = "ms_player_contact_attack_collision_update" }
 "0x8227AC28" = { }
 "0x8227AFD0" = { }
 "0x8227B050" = { }
@@ -480,7 +480,7 @@
 "0x82292478" = { }
 "0x82292568" = { }
 "0x82292998" = { }
-"0x82292A70" = { }
+"0x82292A70" = { name = "ms_player_straight_projectile_update" }
 "0x82293540" = { }
 "0x822935E0" = { }
 "0x82293680" = { }
