@@ -184,6 +184,10 @@ std::string BuildIniText(const Config& c) {
         //"// 360 reference. Set 0 to disable (stock).\n"
      << "LowresTiledBias = " << NumStr(c.lowres_tiled_bias) << "\n"
      << "\n"
+        "// If true, the border around the game screen is solid black instead of\n"
+        "// the game's decorative background\n"
+     << "BlackBorder = " << BoolStr(c.black_border) << "\n"
+     << "\n"
         "[Keyboard1]\n"
         "\n"
         "// Basic keyboard-as-controller support. [Keyboard1] drives player 1 and\n"
@@ -394,6 +398,15 @@ const Config& LoadConfig() {
     }
   }
 
+  if (auto it = map.find("graphics.blackborder"); it != map.end()) {
+    if (auto b = AsBool(it->second)) {
+      g_config.black_border = *b;
+    } else {
+      REXLOG_WARN("config: [Graphics] BlackBorder = '{}' is not a bool; using default ({})",
+                  it->second, g_config.black_border);
+    }
+  }
+
   if (auto it = map.find("keyboard1.enabled"); it != map.end()) {
     if (auto b = AsBool(it->second)) {
       g_config.keyboard_enabled = *b;
@@ -444,13 +457,14 @@ const Config& LoadConfig() {
               "[Game] TrialMode = {}, [Game] SkipLogos = {}, [Game] DisableGoPopups = {}, "
               "[Game] UnlockLeona = {}, "
               "[Graphics] GameUpscaleFilter = {}, [Graphics] SampleTexelBias = {}, "
-              "[Graphics] LowresTiledBias = {}",
+              "[Graphics] LowresTiledBias = {}, [Graphics] BlackBorder = {}",
               path.string(), g_config.sleep ? "True" : "False",
               g_config.portable ? "True" : "False",
               g_config.trial_mode ? "True" : "False", g_config.skip_logos ? "True" : "False",
               g_config.disable_go_popups ? "True" : "False",
               g_config.unlock_leona ? "True" : "False", g_config.game_upscale_filter,
-              g_config.sample_texel_bias, g_config.lowres_tiled_bias);
+              g_config.sample_texel_bias, g_config.lowres_tiled_bias,
+              g_config.black_border ? "True" : "False");
   return g_config;
 }
 

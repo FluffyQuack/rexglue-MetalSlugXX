@@ -10,6 +10,7 @@
 #include <rex/rex_app.h>
 #include <rex/thread.h>
 #include <rex/ui/keybinds.h>
+#include <rex/ui/window.h>
 
 #include "metalslugxx_settings.h"
 #include "metalslugxx_crash.h"
@@ -186,6 +187,15 @@ class MetalslugxxApp : public rex::ReXApp {
   // while keeping whatever the user already set. See metalslugxx_settings.h.
   void OnShutdown() override { metalslugxx::SaveConfig(); }
 
+  // The SDK titles the window "<project name> [rexglue-v...]" in
+  // SetupPresentation. Replace it with the game's real name and our release
+  // version; this runs after SetupPresentation, so the window exists.
+  void OnPostSetup() override {
+    if (window()) {
+      window()->SetTitle("Metal Slug XX - v0.9.5");
+    }
+  }
+
   // Resolve the writable-data paths before the runtime locks them in. Two
   // project conventions (see metalslugxx_settings.h):
   //   1. If --game_data_root was not given, default it to the working directory
@@ -217,5 +227,4 @@ class MetalslugxxApp : public rex::ReXApp {
   // Override virtual hooks for customization:
   // void OnPreSetup(rex::RuntimeConfig& config) override {}
   // void OnLoadXexImage(std::string& xex_image) override {}
-  // void OnPostSetup() override {}
 };

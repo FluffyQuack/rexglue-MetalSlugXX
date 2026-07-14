@@ -121,6 +121,40 @@ void msxx_force_integer_playfield_scale(PPCRegister& left, PPCRegister& top,
   bottom.f64 = 720.0;
 }
 
+// ---------------------------------------------------------------------------
+// [Graphics] BlackBorder — black out the background around the playfield.
+//
+// In HD, ms_present_playfield_upscale draws the screen in two steps: first the
+// decorative background that fills the whole frame, then the scaled 320x240
+// playfield quad on top of it. The background is
+// ms_present_draw_backdrop_texture_layers (0x823E70A0): two fullscreen (UV 0..1)
+// quads sampling GameBgTexture (0x82D2EE04) and GameBgTextureA (0x82D2EE08).
+// It is skipped entirely at 640x480, where the playfield fills the frame and
+// there is no border ([[0x82D41B40]+0x280] is the render core's HD flag).
+//
+// The hook sits on that function's entry with return_on_true, so returning true
+// suppresses both quads. It is not enough to suppress them: nothing else clears
+// the frame, so we paint the same area black ourselves via the game's own
+// fullscreen fade quad (ms_gfx_draw_alpha_rect emits an RGB-zero quad whose
+// alpha byte is r3, sized from the render-target dimension globals).
+//
+// Alpha 255 is the game's own "blank the frame" value, not a guess:
+// ms_render_task_draw_present_transition state 0 (0x823DF160) calls this exact
+// helper with a hardcoded 255 to black out the screen at present time, so the
+// blend state in force here is known to make it fully opaque. Leaking its
+// alpha-blend enable is harmless -- the playfield quad that follows sets the
+// blend state it wants either way.
+REX_IMPORT(ms_present_draw_fullscreen_fade_quad, msxx_draw_fullscreen_fade_quad, void(uint32_t));
+
+bool msxx_black_border() {
+  if (!metalslugxx::config().black_border) {
+    return false;  // stock: let the background layers draw
+  }
+
+  msxx_draw_fullscreen_fade_quad(255);
+  return true;
+}
+
 // ===========================================================================
 // 60fps interpolation — STEP A: capture/replay "dry-run" (measurement only)
 // ===========================================================================

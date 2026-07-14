@@ -100,13 +100,13 @@
 "0x823E6D00" = { name = "ms_bind_playfield_upscale_draw_state" }  # binds source texture +0x14 via ms_d3d_set_texture at +0xA8, then upscale vdecl/PS/VS before the 320->640 quad
 "0x823E6DF0" = { name = "ms_upscale_playfield_to_640x480" }       # draws the 320x240 source into the 640x480 intermediate
 "0x823E6F00" = { name = "ms_restore_playfield_saved_targets" }    # binds saved color/depth surfaces (+0x08/+0x10) and clears the present-ready byte
-"0x823E70A0" = { name = "ms_present_draw_aux_textured_quads" }    # optional present-side overlay called from ms_present_playfield_upscale when [[0x82D41B40]+0x280] is set; binds globals 0x82D2EE04/0x82D2EE08 and emits two screen-space textured quads before the final +0x1C source bind
+"0x823E70A0" = { name = "ms_present_draw_backdrop_texture_layers" } # THE border/background behind the playfield: two stretched fullscreen (UV 0..1) textured quads -- GameBgTexture [0x82D2EE04] then GameBgTextureA [0x82D2EE08] -- emitted before the final +0x1C playfield source bind. Called from ms_present_playfield_upscale only when [[0x82D41B40]+0x280] is set, i.e. the render core's HD flag (0x8256FEC8/0x8256FEE8 store 0 for 640x480 and 1 for 1280x720): at 640x480 the playfield fills the frame and there is no border. Both textures are loaded by name at 0x823FB008. See the [Graphics] BlackBorder hook below.
 "0x823E7310" = { name = "ms_present_playfield_upscale" }          # front/final upscale: re-runs 320->640 if ready, binds source +0x1C via ms_d3d_set_texture at +0xB0, draws the 1280x720-frame quad, then calls the post-viewport overlay
 "0x823E7748" = { name = "ms_bind_playfield_saved_targets" }       # lightweight saved-target bind used by the render-task present/draw helper
 "0x823E77A8" = { name = "ms_reset_playfield_present_state" }      # resets sampler/device state after helper draws and clears the present-ready byte
 "0x823E7830" = { name = "ms_ensure_playfield_upscale_targets" }   # lazy init: snapshots current color/depth into +0x08/+0x10, creates scene color/depth surfaces at +0x04/+0x0C, then creates upscale targets
 "0x823E7920" = { name = "ms_ensure_global_playfield_upscale_targets" } # tail wrapper for ms_ensure_playfield_upscale_targets(&0x82C0B204)
-"0x823F8570" = { name = "ms_draw_playfield_post_viewport_overlay" } # receives the final viewport rectangle from ms_present_playfield_upscale, records it in globals, binds an overlay texture, and emits a quad
+"0x823F8570" = { name = "ms_present_draw_demo_logo_overlay" } # NOT a backdrop (renamed 2026-07-14): the 0x82D2EE00 texture it binds is DemoLogoTexture, and the quad is a single 190x79 rect at game-space (65,5)-(255,84) -- top-centre INSIDE the playfield, not around it. Receives the final viewport rectangle from ms_present_playfield_upscale, records/scales it into 0x82C0B290/94 (viewport px per 320x240 unit) + 0x82D2EB80/84 (viewport origin), draws the logo when both gates ([0x82D30330] and [[0x82D7B13C]+0x5402]) are set, then tail-calls ms_background_draw_tile_sprite_batches.
 
 # Sound / XACT path (RE'd 2026-06-17 from the XAudio imports and XACT bank/cue
 # object flow used by media\sounds\*.xgs/*.xsb/*.xwb). The game wraps a bundled
@@ -214,8 +214,12 @@
 "0x823F8520" = { name = "ms_set_quad_modulate_color_raw" } # store a prepacked ARGB modulate color at [0x82C0B28C]; ms_set_quad_modulate_color is the byte-pack wrapper.
 "0x823F8550" = { name = "ms_get_quad_modulate_alpha" }     # return the high/alpha byte from the current packed quad modulate color.
 "0x823F8560" = { name = "ms_sprite_alloc_index_buffers_thunk" } # tiny tail-call wrapper into ms_sprite_alloc_index_buffers.
-"0x823F8770" = { name = "ms_select_present_overlay_texture" }   # bounds-check a 0..6 overlay slot and copy its texture handle into the active present-overlay globals.
-"0x823F87A0" = { name = "ms_draw_selected_present_overlay" }     # draw the selected present-overlay texture as an immediate fullscreen/page rect, then unbind texture slot 0.
+"0x823F8770" = { name = "ms_present_select_game_over_image" }   # NOT a backdrop (renamed 2026-07-14): bounds-check a 0..6 slot and copy that entry of the texture table at 0x82D2EE14 -- which holds GameOverTexture1..7, loaded by name at 0x823FB080+ -- into the active present-image globals [0x82D2DAF4] (+ mirror [0x82DCCD7C]).
+"0x823F87A0" = { name = "ms_present_draw_selected_game_over_image" } # NOT a backdrop (renamed 2026-07-14): draw the image selected above ([0x82D2DAF4], a GameOverTexture) as an immediate fullscreen rect sized from the render-target width/height globals, then unbind texture slot 0. UVs depend on the HD flag [[0x82D41B40]+0x280]. Called from ms_render_task_draw_present_transition.
+"0x823F8968" = { name = "ms_present_draw_fullscreen_fade_quad" } # draws an alpha-only fullscreen color quad over the render-target dimensions via ms_gfx_draw_alpha_rect; r3 supplies the 0..255 fade alpha. RGB is hardcoded zero, so alpha 255 = fully opaque BLACK -- exactly how ms_render_task_draw_present_transition state 0 (0x823DF160) blanks the frame. Reused by the [Graphics] BlackBorder hook.
+"0x823F89C8" = { name = "ms_present_force_transition_idle" } # force the present-transition substate at 0x82D2EB9C to idle/state 6 and return 0. (Renamed 2026-07-14: nothing ties it to the backdrop.)
+"0x823F89E0" = { name = "ms_present_step_transition_tiles" } # animated present-transition stepper: initializes and advances the 16-entry tile/strip geometry tables around 0x82D2ECE0/0x82D2EC20. (Renamed 2026-07-14: nothing ties it to the backdrop.)
+"0x823F92C8" = { name = "ms_present_upload_transition_tiles" } # uploads the animated present-transition tile geometry into the resource at 0x82D2EB8C after quantizing the float table to halfword fields. Called from ms_render_task_draw_present_transition. (Renamed 2026-07-14: nothing ties it to the backdrop.)
 
 # (3d) Dynamic vertex/index buffer pool used by the sprite batcher.
 "0x823F6EA8" = { name = "ms_sprite_alloc_index_buffers" }  # lazily create the 8 dynamic index buffers ([0x82D2D174] array) and reset batch write state
@@ -223,7 +227,20 @@
 "0x823F6F70" = { name = "ms_sprite_flip_dynamic_buffer" }  # flush+swap the active dynamic buffer (double-buffer toggle at [0x82D2D184])
 "0x823F7048" = { name = "ms_sprite_append_indices" }       # append a quad's 16-bit indices to the locked dynamic index buffer
 
-# (3e) Higher-level direct sprite/page draw frontends.
+# (3e) Asset-side sprite bank loading and decode. These are the file/buffer
+# loaders that populate the indexed sprite frame/CHR/CMP/ANM/CLUT data consumed
+# by ms_render_list_add_sprite, ms_build_palette_texture, and the dirty texture
+# page uploader above.
+"0x822037F0" = { name = "ms_sprite_asset_ensure_arena" } # lazy-allocate the shared sprite/asset arena at [0x82CF1C30]+0x74, clear it, and initialize its base/capacity cursors.
+"0x823DFBC0" = { name = "ms_asset_load_file_to_buffer" } # common asset file loader: widen an ASCII path, resolve it through the game data/archive path, copy bytes into caller-provided memory, and return the loaded byte count.
+"0x823DF3A0" = { name = "ms_asset_relocate_be_offset_table" } # walk a 0-terminated big-endian offset table, byteswap each entry, and convert offsets to in-buffer pointers.
+"0x82203B88" = { name = "ms_asset_decode_master_pak_records" } # parse the loaded %s.PAK record table and dispatch record payloads into global object/map/sprite buffers, including offset-table relocation cases.
+"0x82203FD8" = { name = "ms_load_stage_master_asset_pak" } # load a stage/global %s.PAK into the sprite asset arena, decode it, and mark object sprite banks with data present as lazy-loadable.
+"0x82204150" = { name = "ms_obj_sprite_load_bank_assets" } # lazy-load one object sprite bank: cmp_%s.bin, anm_%s.bin, frm_%s.bin, optional %s.pal, and chr_%s.bin; relocates frame/CLUT pointers and builds the palette texture.
+"0x82204388" = { name = "ms_obj_sprite_load_all_banks" } # wrapper that walks all 199 object sprite bank slots and calls ms_obj_sprite_load_bank_assets for each.
+"0x82204668" = { name = "ms_load_common_sprite_assets" } # load common sprite data files (obj_pal*.dat/bin, fix_tex.bin, ms4_data.bin, ms4_scrl.bin), initialize sprite index buffers, then load all object sprite banks.
+
+# (3f) Higher-level direct sprite/page draw frontends.
 "0x822031A8" = { name = "ms_background_clear_tile_sprite_map" } # clear the 40x32-stride halfword background/tile map at 0x82D7CB40; called by the scene build path before the direct tile batch renderer.
 "0x822031D0" = { name = "ms_background_draw_tile_sprite_batches" } # BACKGROUND/TILE PASS: called from ms_scene_render @0x822508A4; scans the 0x82D7CB40 tile map, builds packed sprite records in 128-entry chunks, flushes them through ms_draw_sprite_batch, then draws the small solid overlay rect pass.
 "0x82209B90" = { name = "ms_background_blit_tile_list_to_map" } # copy a 0xFFFF-terminated halfword tile list into the 0x82D7CB40 background/tile map with clipping and set dirty flag 0x82D7CB24.
@@ -240,6 +257,14 @@
 "0x8220B150" = { name = "ms_background_count_tile_stream_ops" } # count decoded background tile stream ops by repeatedly calling ms_background_read_tile_stream_op until the terminator.
 "0x8220B1E0" = { name = "ms_background_decode_tile_stream_to_map" } # decode a compressed background tile stream into 0x82D7CB40, advancing one map row per op and setting the dirty flag.
 "0x82206E68" = { name = "ms_render_draw_sprite_page_entry" } # higher-level page entry frontend used by the 0x821F9xxx render passes: resolves a page/tile record, applies global alpha, and emits one or two ms_draw_sprite_page_rect calls.
+"0x821F4A88" = { name = "ms_background_init_page_tile_mode" } # page-tile render-mode setup: clears 60-entry page-slot/index arrays, resets scroll/color state, stores the active mode byte, and seeds mode-dependent page-slot tables.
+"0x821F4C88" = { name = "ms_background_apply_page_tile_mode" } # page-tile render-mode switch helper: promotes pending page slots into the active list, configures the 8/20/32/60-slot windows for the mode, and stores the mode at 0x82D8D66E.
+"0x821F99C8" = { name = "ms_background_build_page_entry_queues" } # per-scene-update builder called before the scene logic/update path: clears the page-entry queue counts, normalizes scroll accumulators, dispatches mode-specific page-tile builders, and fills the queues consumed by the page-entry flushers.
+"0x821F51F8" = { name = "ms_background_build_mode26_page_tile_queues" } # mode-26 page-tile builder reached only from ms_background_build_page_entry_queues; walks the active page-slot arrays and emits hardware page-entry records rather than writing the 0x82D7CB40 tile map.
+"0x821F65F0" = { name = "ms_background_build_mode_table_page_tile_queues" } # page-tile builder reached through the render-mode jump table for the 38..63 mode range; emits page-entry queue records from the active page-slot tables.
+"0x821F76A0" = { name = "ms_background_build_scrolling_page_tile_queues" } # state-selected scrolling/wraparound page-tile builder: called with mode arg 0/1 by ms_background_build_page_entry_queues, scans the 0x82D746C0 background descriptor, and appends records to the A/B page-entry queues.
+"0x821F9208" = { name = "ms_render_reset_page_entry_queue_b_indices" } # clear the 32-entry queue-B index list at 0x82DA94C0 to -1; used by page-tile setup paths before ms_render_flush_page_entry_queue_b consumes it.
+"0x821F9898" = { name = "ms_render_collect_page_queue_a_for_forced_unit_flush" } # scan queue-A entries and append indices whose page id is 0..19 into the 0x82CF1950 forced-unit-fields list consumed by ms_render_flush_page_entry_queue_forced_unit_fields.
 "0x821F9038" = { name = "ms_render_flush_page_entry_queue_a" } # scene-render queue flush: count at 0x82DA9544, index list at 0x82DAB680, records at 0x82D966E8; draws via ms_render_draw_sprite_page_entry before the main sprite-list flush.
 "0x821F9230" = { name = "ms_render_flush_page_entry_queue_b" } # companion page-entry queue flush: count at 0x82DAB664, index list at 0x82DA94C0, records at 0x82DAB788; draws via ms_render_draw_sprite_page_entry before the main sprite-list flush.
 "0x821F90F8" = { name = "ms_render_flush_page_entry_queue_forced_unit_fields" } # page-entry queue flush for the 0x82CF1950 list; temporarily forces four record float fields to 1.0 while drawing, then restores them.
@@ -407,6 +432,12 @@
 # --- per-frame orchestration ---
 "0x823F9C78" = { name = "ms_render_frame" }   # (do_scene r3): when do_scene!=0, set up the 320x240 playfield target (0x823E6F60) -> ms_scene_render -> finish (0x823E7018); ALWAYS bumps the global frame counter [0x82D2A860] and runs ms_task_scheduler (+ 0x823E42B0). Called once per game tick by ms_update_and_render_frame, which passes do_scene=255 only on the first loop pass.
 "0x82250390" = { name = "ms_scene_render" }   # render the scene into the playfield: configure the viewport/border, flush page/effect queues and the foreground sprite list, then call ms_background_draw_tile_sprite_batches at 0x822508A4 for the background/tile pass.
+"0x82206E28" = { name = "ms_render_scene_rect_begin_hook" } # no-op render hook called once by ms_scene_render before publishing the active playfield rect; the computed width/height are also stored to 0x82DDEA4C/4E.
+"0x82206E30" = { name = "ms_render_scene_set_clip_rect_hook" } # no-op render hook called by ms_scene_render with rect args (left/top/right/bottom) for the current playfield, page-queue subrects, and the background tile pass.
+"0x821FD810" = { name = "ms_scene_draw_backdrop_color_quad" } # draw the solid RGB backdrop/border color behind the scene using the color-quad path; ms_scene_render calls this with either white or globals 0x82D8D680/0x82DB94A1/0x82DDC7E7.
+"0x821FCBD8" = { name = "ms_scene_post_scroll_effect_hook" } # no-op scene-only hook after ms_scroll_speed_render_effect and before the border/transition overlay draw.
+"0x821FCBE0" = { name = "ms_scene_draw_border_transition_overlays" } # scene-only overlay pass: gated by scene flags at 0x82D8CA6B/6C, builds color quads around the current playfield/scroll extents via ms_render_effect_color_quad_queue_draw.
+"0x82207448" = { name = "ms_render_scene_end_hook" } # no-op tail hook at the end of ms_scene_render after the background tile batch.
 # The other two legs of ms_render_frame's do_scene trio (bl @0x823f9cb0/b8), named
 # so the 60fps off-pass driver can REX_IMPORT and re-invoke them to re-draw the
 # lerped scene into the 320x240 EDRAM. Both are void() at the call site (no args set).
@@ -475,6 +506,7 @@
 "0x823DEFE8" = { name = "ms_render_task_call_slot14" } # tail wrapper for [0x82D41B40] vtable+0x14; same callback slot ms_render_task_fiber invokes before ms_render_task_draw_frame
 "0x823DF0C8" = { name = "ms_render_task_draw_present_transition" } # state-dependent present prep keyed by [0x82C0AB74] and alpha/timer [0x82D2A898]; binds saved targets, draws the transition/backdrop helpers, then resets playfield present state
 "0x823DF5A0" = { name = "ms_render_present_transition_state_step" } # transition state machine called from scene logic; advances [0x82C0AB74]/[0x82D2A898], calls ms_render_frame(0), and drives fade/audio helpers during render-state transitions
+"0x8256F220" = { name = "ms_gfx_draw_alpha_rect" } # generic immediate alpha-rectangle draw: binds color shaders, enables alpha blend, emits a 3-vertex RECTLIST over f1/f2/f3/f4, and packs r3 into the vertex alpha byte.
 
 # --- render-task scene snapshot / resolve-adjacent dispatch (RE'd 2026-06-25, P2/P3) ---
 # The dynamic call in ms_render_task_draw_frame is [0x82D41A70]->vtable+0x10.
@@ -5417,6 +5449,20 @@ address = 0x823E7664
 name = "msxx_force_integer_playfield_scale"
 registers = ["f31", "f30", "f28", "f27"]
 after_instruction = false
+
+# [Graphics] BlackBorder — solid-black border instead of the game's background.
+#
+# ms_present_draw_backdrop_texture_layers (0x823E70A0) is the whole border: the
+# two stretched fullscreen GameBgTexture/GameBgTextureA quads the HD present path
+# lays down before the scaled 320x240 playfield quad. The hook sits on its entry
+# and, when [Graphics] BlackBorder is set, suppresses the function (return_on_true)
+# after painting the frame opaque black itself — nothing else clears it, so a bare
+# skip would leave stale pixels. See metalslugxx_hooks.cpp (msxx_black_border).
+[[midasm_hook]]
+address = 0x823E70A0
+name = "msxx_black_border"
+after_instruction = false
+return_on_true = true
 
 # [Graphics] Scoped playfield filtering.
 #

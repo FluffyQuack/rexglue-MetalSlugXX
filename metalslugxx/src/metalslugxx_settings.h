@@ -174,6 +174,27 @@ struct Config {
   // command-line `--game_lowres_tiled_bias=...` is not clobbered back to default.
   bool lowres_tiled_bias_set = false;
 
+  // BlackBorder = True : fill the area around the 320x240 playfield with solid
+  //                      black instead of the game's decorative background.
+  // BlackBorder = False: draw the stock background (default).
+  //
+  // In HD the game scales the 320x240 playfield into the middle of the screen
+  // and covers the rest with two stretched fullscreen layers, GameBgTexture and
+  // GameBgTextureA (globals 0x82D2EE04 / 0x82D2EE08), drawn by
+  // ms_present_draw_backdrop_texture_layers (0x823E70A0) just before the
+  // playfield quad. That call is gated on the render core's HD flag
+  // ([[0x82D41B40]+0x280], set to 1 for 1280x720 and 0 for 640x480, where the
+  // playfield fills the screen and no border exists).
+  //
+  // Implemented as a [[midasm_hook]] with return_on_true on that function's
+  // entry: when True we skip both textured quads and instead draw one opaque
+  // black fullscreen quad through the game's own fade-quad helper
+  // (ms_present_draw_fullscreen_fade_quad at alpha 255). The border has to be
+  // *painted*, not merely skipped -- those quads are what covers the frame, so
+  // dropping them without a replacement would leave stale pixels rather than
+  // black. See metalslugxx_hooks.cpp (msxx_black_border).
+  bool black_border = false;
+
   // [Keyboard1] / [Keyboard2]
   //
   // Basic keyboard-as-controller support. [Keyboard1] drives player 1's emulated
